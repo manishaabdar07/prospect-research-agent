@@ -17,11 +17,13 @@ Two independent projects:
 docker compose up -d
 ```
 
-Starts Postgres on `localhost:5432`, db `prospect_research`, user/password
-`prospect`/`prospect`. Matches the `DATABASE_URL` in `backend/.env.example`:
+Starts Postgres on `localhost:5433` (mapped off the default 5432 to avoid
+clashing with any native Postgres already installed on the host), db
+`prospect_research`, user/password `prospect`/`prospect`. Matches the
+`DATABASE_URL` in `backend/.env.example`:
 
 ```
-postgresql://prospect:prospect@localhost:5432/prospect_research
+postgresql://prospect:prospect@localhost:5433/prospect_research
 ```
 
 If you already run Postgres locally, skip this and point `DATABASE_URL` at

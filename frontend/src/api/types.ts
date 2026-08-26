@@ -139,20 +139,19 @@ export interface RiskFlag {
 
 export interface CompanyInfo {
   company_id?: string;
-  company_name?: string;
-  industry?: string;
+  name?: string;
+  domain?: string | null;
+  headcount?: number | null;
   city?: string;
-  website?: string;
-  size_estimate?: string;
+  industry_raw?: string;
   [key: string]: unknown;
 }
 
 export interface ProspectInfo {
   prospect_id?: string;
+  company_id?: string;
   full_name?: string;
   title_raw?: string;
-  company_name?: string;
-  city?: string;
   role_bucket?: string;
   seniority?: string;
   status?: ProspectStatus;

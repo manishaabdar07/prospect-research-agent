@@ -112,7 +112,7 @@ export default function ProspectDetail() {
             <HookStrengthBadge hookStrength={research?.hook_strength ?? null} />
           </div>
           <div className="text-sm text-slate-500 mt-1">
-            {prospect.title_raw} · {prospect.company_name} · {prospect.city}
+            {prospect.title_raw} · {company.name} · {company.city}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -190,13 +190,13 @@ export default function ProspectDetail() {
             <div className="flex justify-between gap-2">
               <dt className="text-slate-500">Name</dt>
               <dd className="text-slate-900 text-right">
-                {company.company_name ?? prospect.company_name ?? "—"}
+                {company.name ?? "—"}
               </dd>
             </div>
-            {company.industry !== undefined && (
+            {company.industry_raw && (
               <div className="flex justify-between gap-2">
                 <dt className="text-slate-500">Industry</dt>
-                <dd className="text-slate-900 text-right">{String(company.industry)}</dd>
+                <dd className="text-slate-900 text-right">{company.industry_raw}</dd>
               </div>
             )}
             {company.city !== undefined && (
@@ -205,25 +205,25 @@ export default function ProspectDetail() {
                 <dd className="text-slate-900 text-right">{String(company.city)}</dd>
               </div>
             )}
-            {company.size_estimate !== undefined && (
+            {company.headcount !== undefined && company.headcount !== null && (
               <div className="flex justify-between gap-2">
-                <dt className="text-slate-500">Size estimate</dt>
+                <dt className="text-slate-500">Headcount</dt>
                 <dd className="text-slate-900 text-right">
-                  {String(company.size_estimate)}
+                  {String(company.headcount)}
                 </dd>
               </div>
             )}
-            {company.website !== undefined && company.website && (
+            {company.domain && (
               <div className="flex justify-between gap-2">
-                <dt className="text-slate-500">Website</dt>
+                <dt className="text-slate-500">Domain</dt>
                 <dd className="text-right">
                   <a
-                    href={String(company.website)}
+                    href={`https://${company.domain}`}
                     target="_blank"
                     rel="noreferrer noopener"
                     className="text-brand-600 hover:underline break-all"
                   >
-                    {String(company.website)}
+                    {company.domain}
                   </a>
                 </dd>
               </div>
