@@ -50,7 +50,7 @@ def run_research_job(prospect_id: str) -> None:
         result = run_research_agent(prospect, company)
 
         # Replace any prior run's findings for this prospect (see models.py
-        # docstring: only the latest research run is retained).
+        # docstring: only the elatest research run is retained).
         db.execute(delete(Finding).where(Finding.prospect_id == prospect_id))
         existing_rf = db.get(ResearchFindings, prospect_id)
         if existing_rf is not None:

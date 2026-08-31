@@ -41,20 +41,30 @@ SYSTEM_PROMPT = (
 
 
 def _build_initial_prompt(prospect: Prospect, company: Company) -> str:
-    domain = company.domain or f"{company.name.lower().replace(' ', '')}.com"
+    place = company.city or ""
+    title = prospect.title_raw or ""
+    company_place = f"{company.name} {place}".strip()
+
     hints = [
-        f'"{company.name}" site:{domain}',
-        f"{company.name} Pune expansion OR plant",
+        company_place,
         f"{company.name} careers",
-        f"{company.name} jobs Pune",
+        f"{company.name} jobs {place}".strip(),
+        f"{company.name} expansion OR new plant OR investment",
         f"{company.name} IATF 16949 OR ISO certification",
-        f'"{prospect.full_name}" {company.name}',
+        f'"{prospect.full_name}" {title} {company.name}'.strip(),
         f"{company.name} apprentice OR ITI OR contract workers",
     ]
+    # domain is optional -- only add a site: search if one happens to be on
+    # file; never guess one, since a wrong guess produces a dead-end query.
+    if company.domain:
+        hints.insert(0, f'"{company.name}" site:{company.domain}')
+
     hints_block = "\n".join(f"- {h}" for h in hints)
+    person_line = f"Prospect: {prospect.full_name}" + (f", {title}" if title else "")
     return (
-        f"Prospect: {prospect.full_name}, {prospect.title_raw}\n"
-        f"Company: {company.name} ({company.city}, industry: {company.industry_raw or 'unknown'}, "
+        f"{person_line}\n"
+        f"Company: {company.name} ({place or 'location unknown'}, "
+        f"industry: {company.industry_raw or 'unknown'}, "
         f"headcount: {company.headcount if company.headcount is not None else 'unknown'})\n\n"
         "Some suggested search queries to get started (use, adapt, or ignore as you see fit):\n"
         f"{hints_block}\n\n"

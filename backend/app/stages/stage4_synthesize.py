@@ -151,7 +151,7 @@ def synthesize_prospect(db, prospect: Prospect) -> SynthesisOutcome:
                 max_tokens=2000,
                 system=SYSTEM_PROMPT,
                 tools=[RETURN_DRAFT_TOOL],
-                tool_choice={"type": "tool", "name": "return_draft"},
+                tool_choice={ "type": "tool", "name": "return_draft"},
                 messages=messages,
             )
         except Exception as exc:
