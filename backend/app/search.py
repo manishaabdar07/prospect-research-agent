@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import httpx
+from lxml import html as lxml_html
 
 from app.config import get_settings
 
@@ -68,9 +69,46 @@ def _brave_search(query: str, count: int = 8) -> list[SearchResult]:
     return results
 
 
+def _duckduckgo_search(query: str, count: int = 8) -> list[SearchResult]:
+    """No-signup fallback provider: scrapes DuckDuckGo's plain-HTML results page
+    (html.duckduckgo.com -- the non-JS endpoint, returns direct result URLs).
+
+    DuckDuckGo has no free public search API, so this is best-effort HTML
+    scraping rather than a documented API contract; like the other providers
+    it fails open (returns []) on any network/parsing error instead of raising.
+    """
+    try:
+        resp = httpx.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": query},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ProspectResearchAgent/1.0)"},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        tree = lxml_html.fromstring(resp.text)
+    except Exception:
+        return []
+
+    results: list[SearchResult] = []
+    for link in tree.xpath('//a[@class="result__a"]'):
+        href = link.get("href", "").strip()
+        title = link.text_content().strip()
+        if not href:
+            continue
+        snippet_nodes = link.xpath(
+            './ancestor::div[contains(@class, "result__body")][1]//a[@class="result__snippet"]'
+        )
+        snippet = snippet_nodes[0].text_content().strip() if snippet_nodes else ""
+        results.append(SearchResult(title=title, url=href, snippet=snippet))
+        if len(results) >= count:
+            break
+    return results
+
+
 _PROVIDERS = {
     "mock": _mock_search,
     "brave": _brave_search,
+    "duckduckgo": _duckduckgo_search,
 }
 
 

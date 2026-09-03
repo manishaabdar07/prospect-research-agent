@@ -95,7 +95,7 @@ backend/
 | `DATABASE_URL` | `postgresql://prospect:prospect@localhost:5432/prospect_research` | Matches the root `docker-compose.yml` Postgres service credentials exactly. |
 | `ANTHROPIC_API_KEY` | unset | Required for `/research` and `/synthesize`. Unset => those endpoints return `503`. |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5` | Used for both the Stage 3 agent loop and the Stage 4 single call. |
-| `SEARCH_PROVIDER` | `mock` | `mock` (default, no key, always returns `[]`) or `brave`. |
+| `SEARCH_PROVIDER` | `mock` | `mock` (default, no key, always returns `[]`), `duckduckgo` (no key, scrapes DuckDuckGo's HTML results page), or `brave`. |
 | `BRAVE_API_KEY` | unset | Only used when `SEARCH_PROVIDER=brave`. |
 | `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated list; Vite's default dev port. |
 | `AGENT_MAX_TOOL_CALLS` | `12` | Stage 3 tool-call budget. |
