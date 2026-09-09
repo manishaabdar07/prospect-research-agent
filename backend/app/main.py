@@ -36,6 +36,12 @@ app.include_router(eval_router.router, prefix="/api")
 app.include_router(pipeline.router, prefix="/api")
 
 
+# Temporary diagnostic marker so we can confirm a restart actually loaded
+# this code (bump the string whenever verifying a restart matters). Remove
+# once the "0 findings despite full budget" issue is root-caused.
+BUILD_MARKER = "diag-2026-09-03-v2"
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "build": BUILD_MARKER}

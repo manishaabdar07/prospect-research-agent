@@ -12,10 +12,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from app.fetch_util import FetchError, fetch_and_extract
 from app.ids import new_finding_id
 from app.search import search as run_search
+
+# Temporary diagnostic trace: appends one line per tool call to a plain file
+# instead of (or as well as) stdout, so it can be read regardless of which
+# terminal/process is actually running the server. Remove once DEF-01 /
+# the "0 findings despite full budget" issue is root-caused.
+_DEBUG_LOG = Path(__file__).resolve().parent.parent.parent / "data" / "agent_debug.log"
+
+
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+    try:
+        with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
 
 VALID_SLOTS = {
     "WHAT_THEY_MAKE",
@@ -158,7 +175,9 @@ def handle_tool_call(session: AgentSession, tool_name: str, tool_input: dict) ->
         try:
             results = run_search(query)
         except Exception as exc:
+            _log(f"[agent] search {query!r} -> ERROR: {exc}")
             return f"error: search failed: {exc}", True
+        _log(f"[agent] search {query!r} -> {len(results)} result(s)")
         if not results:
             return "No results found for this query.", False
         lines = [f"- {r.title} | {r.url} | {r.snippet}" for r in results]
@@ -171,10 +190,13 @@ def handle_tool_call(session: AgentSession, tool_name: str, tool_input: dict) ->
         try:
             text = fetch_and_extract(url)
         except FetchError as exc:
+            _log(f"[agent] fetch {url!r} -> ERROR: {exc}")
             return f"error: {exc}", True
         except Exception as exc:
+            _log(f"[agent] fetch {url!r} -> UNEXPECTED ERROR: {exc}")
             return f"error: unexpected fetch failure: {exc}", True
         session.fetched_urls.add(url)
+        _log(f"[agent] fetch {url!r} -> OK, {len(text)} chars")
         return text, False
 
     if tool_name == "record_finding":
@@ -187,8 +209,10 @@ def handle_tool_call(session: AgentSession, tool_name: str, tool_input: dict) ->
             return "error: confidence must be a number between 0.0 and 1.0", True
 
         if slot not in VALID_SLOTS:
+            _log(f"[agent] record_finding REJECTED (bad slot {slot!r})")
             return f"error: slot must be one of {sorted(VALID_SLOTS)}", True
         if not claim:
+            _log("[agent] record_finding REJECTED (empty claim)")
             return "error: claim must not be empty", True
         if len(claim.split()) > 40:
             # Soft cap per spec ("<=30 words, don't hard-fail on word count"):
@@ -196,18 +220,22 @@ def handle_tool_call(session: AgentSession, tool_name: str, tool_input: dict) ->
             # clearly not a paraphrase anymore, so this is where we draw the
             # line between "a little long" (accepted) and "not a paraphrase"
             # (rejected, ask the model to tighten it).
+            _log(f"[agent] record_finding REJECTED (claim too long, {len(claim.split())} words)")
             return "error: claim is too long -- paraphrase in <=30 words", True
         if not (0.0 <= confidence <= 1.0):
+            _log(f"[agent] record_finding REJECTED (confidence {confidence} out of range)")
             return "error: confidence must be between 0.0 and 1.0", True
 
         # THE SINGLE MOST IMPORTANT RULE.
         if source_url not in session.fetched_urls:
+            _log(f"[agent] record_finding REJECTED (source_url {source_url!r} not fetched this session; fetched so far: {sorted(session.fetched_urls)})")
             return (
                 "error: source_url has not been fetched in this session. "
                 "You must call fetch(url) on this URL before you can cite it in record_finding.",
                 True,
             )
 
+        _log(f"[agent] record_finding OK: slot={slot} source_url={source_url!r}")
         session.findings.append(
             RecordedFinding(
                 finding_id=new_finding_id(),

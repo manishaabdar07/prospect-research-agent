@@ -22,22 +22,35 @@ from dataclasses import dataclass, field
 
 import anthropic
 
-from app.agent.tools import TOOL_DEFS, AgentSession, RecordedFinding, handle_tool_call
+from app.agent.tools import TOOL_DEFS, AgentSession, RecordedFinding, _log, handle_tool_call
 from app.config import get_settings
 from app.models import Company, Prospect
 
-SYSTEM_PROMPT = (
-    "You are researching a prospect for a first-touch outreach message. Find "
-    "specific, verifiable, recent facts that would make a stranger's message "
-    "worth reading. You are not writing the message. Fill five evidence slots: "
-    "WHAT_THEY_MAKE, CHANGE_SIGNAL, TECH_OPS_SIGNAL, HR_SIGNAL, PERSON_SIGNAL. "
-    "Rules: Record a finding only with a source URL you actually retrieved. "
-    "Paraphrase - never copy sentences from a source. If you cannot find "
-    "something, say so; do not infer, do not generalise from the industry, do "
-    "not fill a slot with a guess. Concluding that there is no usable hook is "
-    "a correct and valuable outcome; prefer it to a weak one. You have a "
-    "budget of 12 tool calls. Spend them wisely."
-)
+def _build_system_prompt(max_tool_calls: int) -> str:
+    return (
+        "You are researching a prospect for a first-touch outreach message. Find "
+        "specific, verifiable, recent facts that would make a stranger's message "
+        "worth reading. You are not writing the message. Fill five evidence slots: "
+        "WHAT_THEY_MAKE, CHANGE_SIGNAL, TECH_OPS_SIGNAL, HR_SIGNAL, PERSON_SIGNAL. "
+        "Rules: Record a finding only with a source URL you actually retrieved. "
+        "Paraphrase - never copy sentences from a source. If you cannot find "
+        "something, say so; do not infer, do not generalise from the industry, do "
+        "not fill a slot with a guess. Concluding that there is no usable hook is "
+        "a correct and valuable outcome; prefer it to a weak one. "
+        "Call record_finding immediately after any fetch that gives you a "
+        "specific, citable fact for a slot -- do this before your next search "
+        "or fetch call, not after you've explored further leads. A partial set "
+        "of solid findings beats a fuller picture you never wrote down. "
+        "Never call fetch on a linkedin.com URL -- it is always blocked and "
+        "will always fail; skip LinkedIn links in search results entirely and "
+        "use a different source instead. Two failed tool calls in a row ends "
+        "your session immediately with nothing recorded, so treat every fetch "
+        "as a real attempt, not a guess -- don't fetch a URL you're inventing "
+        "or unsure exists. "
+        f"You have a budget of {max_tool_calls} tool calls total, across search, "
+        "fetch, and record_finding combined. Spend them wisely, and leave enough "
+        "in reserve to call submit_findings before the budget runs out."
+    )
 
 
 def _build_initial_prompt(prospect: Prospect, company: Company) -> str:
@@ -85,13 +98,29 @@ def run_research_agent(prospect: Prospect, company: Company) -> AgentRunResult:
     settings = get_settings()
     session = AgentSession()
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    system_prompt = _build_system_prompt(settings.AGENT_MAX_TOOL_CALLS)
 
-    messages: list[dict] = [{"role": "user", "content": _build_initial_prompt(prospect, company)}]
+    initial_prompt = _build_initial_prompt(prospect, company)
+    messages: list[dict] = [{"role": "user", "content": initial_prompt}]
+    _log(f"[agent] === START prospect={prospect.full_name!r} company={company.name!r} ===")
     start = time.monotonic()
     consecutive_errors = 0
     non_tool_turns = 0
 
-    def assemble(terminal_reason: str, notes: str, hook_strength: int = 0) -> AgentRunResult:
+    def assemble(terminal_reason: str, notes: str, hook_strength: int | None = None) -> AgentRunResult:
+        if hook_strength is None:
+            # The model never got to self-score via submit_findings (budget/
+            # timeout/error exit). Don't silently discard real findings just
+            # because the session didn't end cleanly: score conservatively
+            # from what was actually recorded rather than defaulting to 0.
+            # Capped at 2 (rubric's "one specific, verifiable fact") since
+            # only the model can judge whether a finding clears the bar for
+            # 3 ("plausibly connects to something Gunadhya does").
+            hook_strength = 2 if session.findings else 0
+        _log(
+            f"[agent] DONE terminal_reason={terminal_reason} hook_strength={hook_strength} "
+            f"tool_calls_used={session.tool_calls_used} findings_recorded={len(session.findings)}"
+        )
         return AgentRunResult(
             findings=list(session.findings),
             hook_strength=hook_strength,
@@ -111,7 +140,7 @@ def run_research_agent(prospect: Prospect, company: Company) -> AgentRunResult:
             response = client.messages.create(
                 model=settings.ANTHROPIC_MODEL,
                 max_tokens=2000,
-                system=SYSTEM_PROMPT,
+                system=system_prompt,
                 tools=TOOL_DEFS,
                 messages=messages,
             )
@@ -185,7 +214,18 @@ def run_research_agent(prospect: Prospect, company: Company) -> AgentRunResult:
                     "is_error": is_error,
                 }
             )
-            if is_error:
+            is_linkedin_rejection = (
+                block.name == "fetch" and "linkedin.com" in str(block.input.get("url", "")).lower()
+            )
+            if is_linkedin_rejection:
+                # A deterministic, by-design policy rejection (see
+                # fetch_util.py), not a genuine execution failure -- don't let
+                # the model spending a call on a forbidden URL count toward
+                # the consecutive-error safety valve alongside real failures
+                # (timeouts, 404s, etc). The model still sees the rejection
+                # in its own tool_result and should not repeat it.
+                pass
+            elif is_error:
                 consecutive_errors += 1
             else:
                 consecutive_errors = 0
