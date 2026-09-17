@@ -1,8 +1,8 @@
-"""Stage 3 - Research Agent: a hand-rolled Anthropic Messages API tool-use loop.
+"""Stage 3 - Research Agent: a hand-rolled OpenAI tool-calling loop.
 
-No framework -- a plain while-loop calling client.messages.create with
-tools=[...] and handling tool_use content blocks, per spec. This is the
-ONLY LLM-driven loop in the system; Stage 4 is a single non-looping call.
+No framework -- a plain while-loop calling client.chat.completions.create
+with tools=[...] and handling tool_calls, per spec. This is the ONLY
+LLM-driven loop in the system; Stage 4 is a single non-looping call.
 
 Stop conditions (enforced here, whichever fires first):
   1. model calls submit_findings
@@ -17,27 +17,42 @@ it always returns an AgentRunResult.
 """
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 
-import anthropic
+import openai
 
-from app.agent.tools import TOOL_DEFS, AgentSession, RecordedFinding, handle_tool_call
+from app.agent.tools import TOOL_DEFS, AgentSession, RecordedFinding, _log, handle_tool_call
 from app.config import get_settings
+from app.llm_client import get_openai_client
 from app.models import Company, Prospect
 
-SYSTEM_PROMPT = (
-    "You are researching a prospect for a first-touch outreach message. Find "
-    "specific, verifiable, recent facts that would make a stranger's message "
-    "worth reading. You are not writing the message. Fill five evidence slots: "
-    "WHAT_THEY_MAKE, CHANGE_SIGNAL, TECH_OPS_SIGNAL, HR_SIGNAL, PERSON_SIGNAL. "
-    "Rules: Record a finding only with a source URL you actually retrieved. "
-    "Paraphrase - never copy sentences from a source. If you cannot find "
-    "something, say so; do not infer, do not generalise from the industry, do "
-    "not fill a slot with a guess. Concluding that there is no usable hook is "
-    "a correct and valuable outcome; prefer it to a weak one. You have a "
-    "budget of 12 tool calls. Spend them wisely."
-)
+def _build_system_prompt(max_tool_calls: int) -> str:
+    return (
+        "You are researching a prospect for a first-touch outreach message. Find "
+        "specific, verifiable, recent facts that would make a stranger's message "
+        "worth reading. You are not writing the message. Fill five evidence slots: "
+        "WHAT_THEY_MAKE, CHANGE_SIGNAL, TECH_OPS_SIGNAL, HR_SIGNAL, PERSON_SIGNAL. "
+        "Rules: Record a finding only with a source URL you actually retrieved. "
+        "Paraphrase - never copy sentences from a source. If you cannot find "
+        "something, say so; do not infer, do not generalise from the industry, do "
+        "not fill a slot with a guess. Concluding that there is no usable hook is "
+        "a correct and valuable outcome; prefer it to a weak one. "
+        "Call record_finding immediately after any fetch that gives you a "
+        "specific, citable fact for a slot -- do this before your next search "
+        "or fetch call, not after you've explored further leads. A partial set "
+        "of solid findings beats a fuller picture you never wrote down. "
+        "Never call fetch on a linkedin.com URL -- it is always blocked and "
+        "will always fail; skip LinkedIn links in search results entirely and "
+        "use a different source instead. Two failed tool calls in a row ends "
+        "your session immediately with nothing recorded, so treat every fetch "
+        "as a real attempt, not a guess -- don't fetch a URL you're inventing "
+        "or unsure exists. "
+        f"You have a budget of {max_tool_calls} tool calls total, across search, "
+        "fetch, and record_finding combined. Spend them wisely, and leave enough "
+        "in reserve to call submit_findings before the budget runs out."
+    )
 
 
 def _build_initial_prompt(prospect: Prospect, company: Company) -> str:
@@ -79,25 +94,72 @@ class AgentRunResult:
     terminal_reason: str = "ERROR"
     agent_notes: str = ""
     tool_calls_used: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
 
 
-def run_research_agent(prospect: Prospect, company: Company) -> AgentRunResult:
+def _tool_call_dict(tc) -> dict:
+    """Shape one OpenAI tool_call object into the plain dict form required
+    when echoing it back inside an assistant message."""
+    return {
+        "id": tc.id,
+        "type": "function",
+        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+    }
+
+
+def _parse_tool_arguments(tc) -> dict:
+    try:
+        parsed = json.loads(tc.function.arguments) if tc.function.arguments else {}
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def run_research_agent(
+    prospect: Prospect, company: Company, client: openai.OpenAI | None = None
+) -> AgentRunResult:
     settings = get_settings()
     session = AgentSession()
-    client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    if client is None:
+        client = get_openai_client()
 
-    messages: list[dict] = [{"role": "user", "content": _build_initial_prompt(prospect, company)}]
+    messages: list[dict] = [
+        {"role": "system", "content": _build_system_prompt(settings.AGENT_MAX_TOOL_CALLS)},
+        {"role": "user", "content": _build_initial_prompt(prospect, company)},
+    ]
+    _log(f"[agent] === START prospect={prospect.full_name!r} company={company.name!r} ===")
     start = time.monotonic()
     consecutive_errors = 0
     non_tool_turns = 0
+    token_totals = {"prompt": 0, "completion": 0, "total": 0}
 
-    def assemble(terminal_reason: str, notes: str, hook_strength: int = 0) -> AgentRunResult:
+    def assemble(terminal_reason: str, notes: str, hook_strength: int | None = None) -> AgentRunResult:
+        if hook_strength is None:
+            # The model never got to self-score via submit_findings (budget/
+            # timeout/error exit). Don't silently discard real findings just
+            # because the session didn't end cleanly: score conservatively
+            # from what was actually recorded rather than defaulting to 0.
+            # Capped at 2 (rubric's "one specific, verifiable fact") since
+            # only the model can judge whether a finding clears the bar for
+            # 3 ("plausibly connects to something the prospect's company does").
+            hook_strength = 2 if session.findings else 0
+        _log(
+            f"[agent] DONE terminal_reason={terminal_reason} hook_strength={hook_strength} "
+            f"tool_calls_used={session.tool_calls_used} findings_recorded={len(session.findings)} "
+            f"tokens_prompt={token_totals['prompt']} tokens_completion={token_totals['completion']} "
+            f"tokens_total={token_totals['total']}"
+        )
         return AgentRunResult(
             findings=list(session.findings),
             hook_strength=hook_strength,
             terminal_reason=terminal_reason,
             agent_notes=notes,
             tool_calls_used=session.tool_calls_used,
+            prompt_tokens=token_totals["prompt"],
+            completion_tokens=token_totals["completion"],
+            total_tokens=token_totals["total"],
         )
 
     while True:
@@ -108,23 +170,32 @@ def run_research_agent(prospect: Prospect, company: Company) -> AgentRunResult:
             return assemble("BUDGET_EXHAUSTED", "Stopped: tool-call budget exhausted.")
 
         try:
-            response = client.messages.create(
-                model=settings.ANTHROPIC_MODEL,
+            response = client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
                 max_tokens=2000,
-                system=SYSTEM_PROMPT,
                 tools=TOOL_DEFS,
                 messages=messages,
             )
         except Exception as exc:
-            return assemble("ERROR", f"Stopped: Anthropic API call failed: {exc}")
+            return assemble("ERROR", f"Stopped: LLM API call failed: {exc}")
 
-        tool_use_blocks = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
+        if response.usage is not None:
+            token_totals["prompt"] += response.usage.prompt_tokens
+            token_totals["completion"] += response.usage.completion_tokens
+            token_totals["total"] += response.usage.total_tokens
+            _log(
+                f"[agent] turn tokens: prompt={response.usage.prompt_tokens} "
+                f"completion={response.usage.completion_tokens} total={response.usage.total_tokens}"
+            )
 
-        if not tool_use_blocks:
+        message = response.choices[0].message
+        tool_calls = message.tool_calls or []
+
+        if not tool_calls:
             non_tool_turns += 1
             if non_tool_turns >= 2:
                 return assemble("ERROR", "Stopped: model did not call submit_findings after repeated nudges.")
-            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "assistant", "content": message.content})
             messages.append(
                 {
                     "role": "user",
@@ -136,71 +207,74 @@ def run_research_agent(prospect: Prospect, company: Company) -> AgentRunResult:
             )
             continue
 
-        messages.append({"role": "assistant", "content": response.content})
+        messages.append(
+            {
+                "role": "assistant",
+                "content": message.content,
+                "tool_calls": [_tool_call_dict(tc) for tc in tool_calls],
+            }
+        )
 
-        tool_results: list[dict] = []
+        tool_result_messages: list[dict] = []
         submitted: AgentRunResult | None = None
 
-        for block in tool_use_blocks:
+        for tc in tool_calls:
+            tool_input = _parse_tool_arguments(tc)
+
             if session.tool_calls_used >= settings.AGENT_MAX_TOOL_CALLS:
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": "error: tool-call budget exhausted",
-                        "is_error": True,
-                    }
+                tool_result_messages.append(
+                    {"role": "tool", "tool_call_id": tc.id, "content": "error: tool-call budget exhausted"}
                 )
                 continue
 
             session.tool_calls_used += 1
 
-            if block.name == "submit_findings":
-                hook_strength_raw = block.input.get("hook_strength", 0)
+            if tc.function.name == "submit_findings":
+                hook_strength_raw = tool_input.get("hook_strength", 0)
                 try:
                     hook_strength = int(hook_strength_raw)
                 except (TypeError, ValueError):
                     hook_strength = 0
                 hook_strength = max(0, min(3, hook_strength))
-                terminal_reason = block.input.get("terminal_reason", "NO_HOOK")
+                terminal_reason = tool_input.get("terminal_reason", "NO_HOOK")
                 if terminal_reason not in ("SUFFICIENT", "NO_HOOK"):
                     terminal_reason = "NO_HOOK"
-                notes = str(block.input.get("notes", ""))
+                notes = str(tool_input.get("notes", ""))
                 submitted = assemble(terminal_reason, notes, hook_strength)
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": "Findings submitted.",
-                    }
+                tool_result_messages.append(
+                    {"role": "tool", "tool_call_id": tc.id, "content": "Findings submitted."}
                 )
                 continue
 
-            result_text, is_error = handle_tool_call(session, block.name, block.input)
-            tool_results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result_text,
-                    "is_error": is_error,
-                }
+            result_text, is_error = handle_tool_call(session, tc.function.name, tool_input)
+            tool_result_messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+
+            is_linkedin_rejection = (
+                tc.function.name == "fetch" and "linkedin.com" in str(tool_input.get("url", "")).lower()
             )
-            if is_error:
+            if is_linkedin_rejection:
+                # A deterministic, by-design policy rejection (see
+                # fetch_util.py), not a genuine execution failure -- don't let
+                # the model spending a call on a forbidden URL count toward
+                # the consecutive-error safety valve alongside real failures
+                # (timeouts, 404s, etc). The model still sees the rejection in
+                # its own tool result and should not repeat it.
+                pass
+            elif is_error:
                 consecutive_errors += 1
             else:
                 consecutive_errors = 0
 
             if consecutive_errors >= settings.AGENT_MAX_CONSECUTIVE_ERRORS:
-                # Fill tool_result for any remaining blocks in this batch so the
-                # message stays well-formed, then stop.
-                remaining = tool_use_blocks[tool_use_blocks.index(block) + 1 :]
+                # Fill a tool result for any remaining calls in this batch so
+                # every tool_call_id gets a reply, then stop.
+                remaining = tool_calls[tool_calls.index(tc) + 1 :]
                 for rem in remaining:
-                    tool_results.append(
+                    tool_result_messages.append(
                         {
-                            "type": "tool_result",
-                            "tool_use_id": rem.id,
+                            "role": "tool",
+                            "tool_call_id": rem.id,
                             "content": "error: session terminated due to repeated tool errors",
-                            "is_error": True,
                         }
                     )
                 return assemble("ERROR", "Stopped: too many consecutive tool errors.")
@@ -209,4 +283,4 @@ def run_research_agent(prospect: Prospect, company: Company) -> AgentRunResult:
             return submitted
 
         non_tool_turns = 0
-        messages.append({"role": "user", "content": tool_results})
+        messages.extend(tool_result_messages)

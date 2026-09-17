@@ -1,20 +1,16 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import {
-  getPdfUrl,
-  getProspect,
-  getResearchStatus,
-  renderProspect,
-  startResearch,
-  synthesizeProspect,
-} from "../api/client";
+import { getProspect, getResearchStatus, startResearch } from "../api/client";
+import type { ProspectDetail as ProspectDetailData } from "../api/types";
 import StatusBadge from "../components/StatusBadge";
 import HookStrengthBadge from "../components/HookStrengthBadge";
 import { RiskFlagList } from "../components/RiskFlagBadge";
 import FindingsTable from "../components/FindingsTable";
-import { EmailStepView } from "../components/EmailStepEditor";
+import EmailDraftCard from "../components/EmailDraftCard";
 import { ErrorBanner, InfoBanner, Spinner } from "../components/Feedback";
+
+const IN_FLIGHT_STATUSES = new Set(["RESEARCH_PENDING", "RESEARCHING"]);
 
 export default function ProspectDetail() {
   const { id } = useParams<{ id: string }>();
@@ -26,6 +22,11 @@ export default function ProspectDetail() {
     queryKey: ["prospect", id],
     queryFn: () => getProspect(id as string),
     enabled: !!id,
+    refetchInterval: (query) => {
+      const data = query.state.data as ProspectDetailData | undefined;
+      const status = data?.prospect.status;
+      return status && IN_FLIGHT_STATUSES.has(status) ? 3000 : false;
+    },
   });
 
   const invalidate = () => {
@@ -33,6 +34,9 @@ export default function ProspectDetail() {
     queryClient.invalidateQueries({ queryKey: ["prospects"] });
   };
 
+  // The one manual affordance left: recovering a prospect that hard-crashed
+  // (e.g. no API key configured when it was queued). Every normal-path step
+  // (qualify, research, generate email) now starts on its own after upload.
   const researchMutation = useMutation({
     mutationFn: () => startResearch(id as string),
     onSuccess: async () => {
@@ -45,7 +49,7 @@ export default function ProspectDetail() {
           const s = await getResearchStatus(id as string);
           if (s.status === "DONE" || s.status === "ERROR") {
             if (s.status === "ERROR") {
-              setPollError(s.terminal_reason ?? "Research failed.");
+              setPollError(s.error_message ?? s.terminal_reason ?? "Research failed.");
             }
             break;
           }
@@ -57,16 +61,6 @@ export default function ProspectDetail() {
         invalidate();
       }
     },
-  });
-
-  const synthesizeMutation = useMutation({
-    mutationFn: () => synthesizeProspect(id as string),
-    onSuccess: invalidate,
-  });
-
-  const renderMutation = useMutation({
-    mutationFn: () => renderProspect(id as string),
-    onSuccess: invalidate,
   });
 
   if (!id) return null;
@@ -89,16 +83,10 @@ export default function ProspectDetail() {
     );
   }
 
-  const { prospect, company, research, draft, risk_flags, pdf_available } =
-    detailQuery.data;
+  const { prospect, company, research, draft, risk_flags } = detailQuery.data;
   const status = prospect.status;
-  const canResearch = status === "QUALIFIED";
-  const canSynthesize = status === "RESEARCHED";
-  const canRender =
-    status === "SYNTHESIZED" ||
-    status === "RENDERED" ||
-    status === "APPROVED" ||
-    status === "EDITED";
+  const canRetryResearch = status === "ERROR";
+  const inFlight = status ? IN_FLIGHT_STATUSES.has(status) : false;
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-6 space-y-6">
@@ -116,7 +104,12 @@ export default function ProspectDetail() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {canResearch && (
+          {inFlight && (
+            <span className="inline-flex items-center gap-1.5 text-sm text-amber-700">
+              <Spinner /> processing automatically…
+            </span>
+          )}
+          {canRetryResearch && (
             <button
               type="button"
               className="btn-secondary"
@@ -126,52 +119,25 @@ export default function ProspectDetail() {
               {(researchMutation.isPending || polling) && (
                 <Spinner className="mr-1.5" />
               )}
-              Research
+              Retry research
             </button>
-          )}
-          {canSynthesize && (
-            <button
-              type="button"
-              className="btn-secondary"
-              disabled={synthesizeMutation.isPending}
-              onClick={() => synthesizeMutation.mutate()}
-            >
-              {synthesizeMutation.isPending && <Spinner className="mr-1.5" />}
-              Synthesize
-            </button>
-          )}
-          {canRender && (
-            <button
-              type="button"
-              className="btn-secondary"
-              disabled={renderMutation.isPending}
-              onClick={() => renderMutation.mutate()}
-            >
-              {renderMutation.isPending && <Spinner className="mr-1.5" />}
-              Render PDF
-            </button>
-          )}
-          {pdf_available && (
-            <a
-              href={getPdfUrl(id)}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="btn-primary"
-            >
-              Download PDF
-            </a>
           )}
         </div>
       </div>
 
+      {status === "ERROR" && prospect.last_error && (
+        <ErrorBanner message={`Last error: ${prospect.last_error}`} />
+      )}
       {pollError && <ErrorBanner message={pollError} />}
       {researchMutation.isError && (
         <ErrorBanner message="Failed to start research." />
       )}
-      {synthesizeMutation.isError && (
-        <ErrorBanner message="Failed to synthesize." />
+
+      {prospect.qualification_reason && (
+        <InfoBanner
+          message={`Qualification: ${prospect.qualification_reason}`}
+        />
       )}
-      {renderMutation.isError && <ErrorBanner message="Failed to render PDF." />}
 
       {risk_flags && risk_flags.length > 0 && (
         <section>
@@ -285,7 +251,13 @@ export default function ProspectDetail() {
           )}
         </div>
         {!research && (
-          <InfoBanner message="No research has been run for this prospect yet." />
+          <InfoBanner
+            message={
+              inFlight
+                ? "Research is running automatically — this will update on its own."
+                : "No research has run for this prospect yet."
+            }
+          />
         )}
         {research && (
           <>
@@ -313,45 +285,28 @@ export default function ProspectDetail() {
         )}
       </section>
 
-      {/* Draft connection note + email sequence */}
+      {/* Email draft: read/edit/send */}
       <section>
         <h2 className="text-base font-semibold text-slate-900 mb-2">
-          Draft outreach
+          Draft outreach email
         </h2>
         {!draft && (
-          <InfoBanner message="No draft synthesized yet. Run Synthesize once research is complete (requires hook strength 2 or 3)." />
+          <InfoBanner message="No email generated yet. This happens automatically once research completes with a strong enough hook (2 or 3)." />
         )}
         {draft?.disqualify && (
           <InfoBanner
-            message={`Not synthesized — disqualified: ${
+            message={`Not sendable — disqualified: ${
               draft.disqualify_reason ?? "insufficient hook strength."
             }`}
           />
         )}
-        {draft && !draft.disqualify && (
-          <div className="space-y-4">
-            <div className="card p-4">
-              <h3 className="text-sm font-semibold text-slate-800 mb-2">
-                Connection note
-              </h3>
-              <p className="text-sm text-slate-700 whitespace-pre-wrap">
-                {draft.connection_note}
-              </p>
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-slate-800 mb-2">
-                Email sequence
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {draft.email_sequence
-                  .slice()
-                  .sort((a, b) => a.step - b.step)
-                  .map((step) => (
-                    <EmailStepView key={step.step} step={step} />
-                  ))}
-              </div>
-            </div>
-          </div>
+        {draft && !draft.disqualify && status && (
+          <EmailDraftCard
+            prospectId={id}
+            prospectStatus={status}
+            prospectEmail={prospect.email}
+            draft={draft}
+          />
         )}
       </section>
 

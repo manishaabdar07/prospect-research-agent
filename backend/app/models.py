@@ -1,20 +1,26 @@
 """SQLAlchemy ORM models mirroring the spec's data model exactly.
 
 Judgment calls (documented here, also see README):
-- ResearchFindings and OutreachDraft are 1:1 with a Prospect (keyed by prospect_id
+- ResearchFindings and EmailDraft are 1:1 with a Prospect (keyed by prospect_id
   as primary key). The spec describes "findings" per-run but does not add a
   research_run_id anywhere in the data model, so a new Stage 3 run REPLACES the
   prior ResearchFindings/Finding rows for that prospect (delete-then-insert),
-  and a new Stage 4 run replaces the prior OutreachDraft row. This keeps "the
+  and a new Stage 4 run replaces the prior EmailDraft row. This keeps "the
   current state of a prospect" simple to query while still satisfying "one per
   prospect per research run" (only the latest run is retained).
 - RiskFlag is NOT a table -- flags are computed at read time in app/risk_flags.py
-  from Finding/OutreachDraft rows already in the DB. This avoids staleness bugs
+  from Finding/EmailDraft rows already in the DB. This avoids staleness bugs
   where a persisted flag disagrees with the underlying data after an edit.
-- CRM: PostgresCRMAdapter is the v1 "CRM" (see app/crm.py) since the whole
-  system already runs on Postgres. Prospect gains pdf_path/pdf_generated_at so
-  attach_file() has somewhere to record the PDF location, and CRMTask stores
-  create_task() calls.
+- Qualification reasons: Prospect.qualification_reason/qualified_at are set for
+  every prospect Stage 2 actually evaluates (pass or fail) so a human can see
+  why, not just that. A prospect not yet reached because of the batch cap is
+  left with qualification_reason=None -- that's "not yet evaluated," distinct
+  from a real disqualification.
+- Prospect.last_error/last_error_at are the persisted (not just in-memory)
+  record of a background-job crash (Stage 3 research or Stage 4 email
+  generation), so ProspectStatus.ERROR survives a server restart and is
+  visible across worker processes -- unlike the old in-memory-only
+  stage3_agent._job_errors dict, which is now a redundant fast-path only.
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     Date,
     DateTime,
     Enum,
@@ -31,7 +38,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -63,14 +69,13 @@ class ProspectSource(str, enum.Enum):
 class ProspectStatus(str, enum.Enum):
     INGESTED = "INGESTED"
     QUALIFIED = "QUALIFIED"
-    RESEARCHING = "RESEARCHING"
-    RESEARCHED = "RESEARCHED"
     DISQUALIFIED = "DISQUALIFIED"
-    SYNTHESIZED = "SYNTHESIZED"
-    RENDERED = "RENDERED"
-    APPROVED = "APPROVED"
-    EDITED = "EDITED"
-    REJECTED = "REJECTED"
+    RESEARCH_PENDING = "RESEARCH_PENDING"
+    RESEARCHING = "RESEARCHING"
+    RESEARCH_COMPLETED = "RESEARCH_COMPLETED"
+    EMAIL_DRAFTED = "EMAIL_DRAFTED"
+    EMAIL_SENT = "EMAIL_SENT"
+    ERROR = "ERROR"
 
 
 class FindingSlot(str, enum.Enum):
@@ -88,23 +93,9 @@ class TerminalReason(str, enum.Enum):
     ERROR = "ERROR"
 
 
-class EmailPurpose(str, enum.Enum):
-    GIVE = "GIVE"
-    ASK = "ASK"
-
-
-class ReviewActionType(str, enum.Enum):
-    APPROVE = "APPROVE"
-    EDIT = "EDIT"
-    REJECT = "REJECT"
-
-
-class RejectReason(str, enum.Enum):
-    BAD_FIT = "BAD_FIT"
-    WEAK_HOOK = "WEAK_HOOK"
-    WRONG_FACTS = "WRONG_FACTS"
-    TONE = "TONE"
-    ALREADY_KNOWN = "ALREADY_KNOWN"
+class EmailDraftStatus(str, enum.Enum):
+    DRAFTED = "DRAFTED"
+    SENT = "SENT"
 
 
 class ExclusionType(str, enum.Enum):
@@ -145,19 +136,24 @@ class Prospect(Base):
         Enum(ProspectStatus, native_enum=False), nullable=False, default=ProspectStatus.INGESTED
     )
 
-    # v1-CRM bookkeeping (see Stage 6 deviation note in README)
-    pdf_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    pdf_generated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Stage 2 qualification outcome -- set for every prospect actually
+    # evaluated (pass or fail), None if not yet reached (e.g. batch cap).
+    qualification_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    qualified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Persisted crash trace for ProspectStatus.ERROR (Stage 3 or Stage 4
+    # background-job failures). See module docstring.
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     company: Mapped["Company"] = relationship(back_populates="prospects")
     findings: Mapped[list["Finding"]] = relationship(back_populates="prospect", cascade="all, delete-orphan")
     research: Mapped["ResearchFindings | None"] = relationship(
         back_populates="prospect", uselist=False, cascade="all, delete-orphan"
     )
-    draft: Mapped["OutreachDraft | None"] = relationship(
+    draft: Mapped["EmailDraft | None"] = relationship(
         back_populates="prospect", uselist=False, cascade="all, delete-orphan"
     )
-    review_actions: Mapped[list["ReviewAction"]] = relationship(back_populates="prospect", cascade="all, delete-orphan")
 
 
 class Finding(Base):
@@ -193,34 +189,30 @@ class ResearchFindings(Base):
     prospect: Mapped["Prospect"] = relationship(back_populates="research")
 
 
-class OutreachDraft(Base):
-    __tablename__ = "outreach_drafts"
+class EmailDraft(Base):
+    """Stage 4 output: one grounded outreach email per prospect.
+
+    Single subject+body email per the current spec -- no LinkedIn connection
+    note, no multi-step drip sequence (that richer shape existed in a prior
+    iteration of this app and was deliberately simplified away).
+    """
+
+    __tablename__ = "email_drafts"
 
     prospect_id: Mapped[str] = mapped_column(ForeignKey("prospects.prospect_id"), primary_key=True)
-    connection_note: Mapped[str] = mapped_column(String(280), nullable=False, default="")
-    email_sequence: Mapped[list] = mapped_column(JSON, default=list)  # list[EmailStep]-shaped dicts
+    subject: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
     claims_used: Mapped[list] = mapped_column(JSON, default=list)  # list[str] finding_ids
-    disqualify: Mapped[bool] = mapped_column(default=False, nullable=False)
+    disqualify: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     disqualify_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    needs_human_review: Mapped[bool] = mapped_column(default=False, nullable=False)
+    needs_human_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[EmailDraftStatus] = mapped_column(
+        Enum(EmailDraftStatus, native_enum=False), nullable=False, default=EmailDraftStatus.DRAFTED
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     prospect: Mapped["Prospect"] = relationship(back_populates="draft")
-
-
-class ReviewAction(Base):
-    __tablename__ = "review_actions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    prospect_id: Mapped[str] = mapped_column(ForeignKey("prospects.prospect_id"), nullable=False, index=True)
-    action: Mapped[ReviewActionType] = mapped_column(Enum(ReviewActionType, native_enum=False), nullable=False)
-    reject_reason: Mapped[RejectReason | None] = mapped_column(Enum(RejectReason, native_enum=False), nullable=True)
-    edited_connection_note: Mapped[str | None] = mapped_column(String(280), nullable=True)
-    edited_email_sequence: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    edit_distance: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-
-    prospect: Mapped["Prospect"] = relationship(back_populates="review_actions")
 
 
 class ExclusionEntry(Base):
@@ -260,16 +252,13 @@ __all__ = [
     "ProspectStatus",
     "FindingSlot",
     "TerminalReason",
-    "EmailPurpose",
-    "ReviewActionType",
-    "RejectReason",
+    "EmailDraftStatus",
     "ExclusionType",
     "Company",
     "Prospect",
     "Finding",
     "ResearchFindings",
-    "OutreachDraft",
-    "ReviewAction",
+    "EmailDraft",
     "ExclusionEntry",
     "CRMTask",
 ]

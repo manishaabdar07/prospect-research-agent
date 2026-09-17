@@ -1,11 +1,13 @@
 """POST /api/pipeline/run-batch.
 
 Convenience endpoint: runs Stage 2 qualify synchronously (it's cheap, plain
-Python, no LLM), then kicks off Stage 3->4->5 for each newly-qualified
-prospect as a background task. Best-effort: if ANTHROPIC_API_KEY isn't set,
-qualify still runs, but the per-prospect background jobs no-op immediately
-(prospects stay at QUALIFIED for a manual /research call once a key is set)
-rather than returning an error, since qualify itself succeeded.
+Python, no LLM), then kicks off Stage 3->4 (research, then generate email)
+for each newly-qualified prospect as a background task. Stops after email
+generation -- sending is always a separate, explicit user action. Best-effort:
+if OPENAI_API_KEY isn't set, qualify still runs, but the per-prospect
+background jobs no-op immediately (prospects stay at QUALIFIED for a manual
+/research call once a key is set) rather than returning an error, since
+qualify itself succeeded.
 """
 from __future__ import annotations
 

@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Finding, OutreachDraft, ProspectStatus, ResearchFindings, ReviewAction, ReviewActionType
+from app.models import EmailDraft, Finding, ResearchFindings
 from app.schemas import EvalMetricsResponse
 
 router = APIRouter(tags=["eval"])
@@ -32,15 +32,15 @@ def eval_metrics(db: Session = Depends(get_db)) -> EvalMetricsResponse:
         hook_recall = with_hook / len(research_rows)
 
     # disqualification_precision: would require human-labeled ground truth on
-    # DISQUALIFIED prospects (they never reach the review queue in this
-    # system, so there's no ReviewAction to compare against). Always null
+    # DISQUALIFIED prospects, which this system doesn't collect. Always null
     # until such a labeling mechanism exists.
     disqualification_precision = None
 
-    # citation_validity: fraction of claims_used ids, across all drafts, that
-    # actually exist among that prospect's Finding rows. Should be ~1.0 given
-    # Stage 4's own validation, but computed from real data rather than assumed.
-    drafts = db.scalars(select(OutreachDraft)).all()
+    # citation_validity: fraction of claims_used ids, across all email drafts,
+    # that actually exist among that prospect's Finding rows. Should be ~1.0
+    # given Stage 4's own validation, but computed from real data rather than
+    # assumed.
+    drafts = db.scalars(select(EmailDraft)).all()
     citation_validity = None
     total_claims = 0
     valid_claims = 0
@@ -57,18 +57,8 @@ def eval_metrics(db: Session = Depends(get_db)) -> EvalMetricsResponse:
     if total_claims > 0:
         citation_validity = valid_claims / total_claims
 
-    # avg_edit_distance: average character-level edit distance across all
-    # EDIT review actions logged so far.
-    edit_actions = db.scalars(
-        select(ReviewAction).where(ReviewAction.action == ReviewActionType.EDIT, ReviewAction.edit_distance.is_not(None))
-    ).all()
-    avg_edit_distance = None
-    if edit_actions:
-        avg_edit_distance = sum(a.edit_distance for a in edit_actions) / len(edit_actions)
-
     return EvalMetricsResponse(
         hook_recall=hook_recall,
         disqualification_precision=disqualification_precision,
         citation_validity=citation_validity,
-        avg_edit_distance=avg_edit_distance,
     )

@@ -3,24 +3,20 @@
 // defaulting to http://localhost:8000/api if the env var is somehow unset.
 
 import type {
-  ApproveResponse,
   DisqualifiedItem,
-  EditRequest,
-  EditResponse,
+  EmailDraft,
+  EmailDraftEditRequest,
+  EmailGenerateResponse,
   EvalMetrics,
   IngestResponse,
   ProspectDetail,
   ProspectListItem,
   ProspectStatus,
   QualifyResponse,
-  RejectRequest,
-  RejectResponse,
-  RenderResponse,
   ResearchStartResponse,
   ResearchStatusResponse,
-  ReviewQueueItem,
   RunBatchResponse,
-  SynthesizeResponse,
+  SendEmailResponse,
 } from "./types";
 
 export const API_BASE_URL: string =
@@ -83,6 +79,14 @@ function postJson<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
+function patchJson<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+}
+
 // ---- 1. ingest ----
 export function ingestCsv(file: File): Promise<IngestResponse> {
   const form = new FormData();
@@ -128,73 +132,44 @@ export function getResearchStatus(
   );
 }
 
-// ---- 7. synthesize ----
-export function synthesizeProspect(id: string): Promise<SynthesizeResponse> {
-  return postJson<SynthesizeResponse>(
-    `/prospects/${encodeURIComponent(id)}/synthesize`,
+// ---- 7. generate email ----
+export function generateEmail(id: string): Promise<EmailGenerateResponse> {
+  return postJson<EmailGenerateResponse>(
+    `/prospects/${encodeURIComponent(id)}/generate-email`,
     {}
   );
 }
 
-// ---- 8. render pdf ----
-export function renderProspect(id: string): Promise<RenderResponse> {
-  return postJson<RenderResponse>(
-    `/prospects/${encodeURIComponent(id)}/render`,
-    {}
-  );
-}
-
-// ---- 9. pdf url helper (used directly as href/iframe src) ----
-export function getPdfUrl(id: string): string {
-  return `${API_BASE_URL}/prospects/${encodeURIComponent(id)}/pdf`;
-}
-
-// ---- 10. review queue ----
-export function getReviewQueue(): Promise<ReviewQueueItem[]> {
-  return request<ReviewQueueItem[]>("/review-queue");
-}
-
-// ---- 11. approve ----
-export function approveReviewItem(id: string): Promise<ApproveResponse> {
-  return postJson<ApproveResponse>(
-    `/review-queue/${encodeURIComponent(id)}/approve`,
-    {}
-  );
-}
-
-// ---- 12. edit ----
-export function editReviewItem(
+// ---- 8. edit email draft ----
+export function updateEmailDraft(
   id: string,
-  body: EditRequest
-): Promise<EditResponse> {
-  return postJson<EditResponse>(
-    `/review-queue/${encodeURIComponent(id)}/edit`,
+  body: EmailDraftEditRequest
+): Promise<EmailDraft> {
+  return patchJson<EmailDraft>(
+    `/prospects/${encodeURIComponent(id)}/email-draft`,
     body
   );
 }
 
-// ---- 13. reject ----
-export function rejectReviewItem(
-  id: string,
-  body: RejectRequest
-): Promise<RejectResponse> {
-  return postJson<RejectResponse>(
-    `/review-queue/${encodeURIComponent(id)}/reject`,
-    body
+// ---- 9. send email ----
+export function sendEmail(id: string): Promise<SendEmailResponse> {
+  return postJson<SendEmailResponse>(
+    `/prospects/${encodeURIComponent(id)}/send-email`,
+    {}
   );
 }
 
-// ---- 14. disqualified ----
+// ---- 10. disqualified ----
 export function getDisqualified(): Promise<DisqualifiedItem[]> {
   return request<DisqualifiedItem[]>("/disqualified");
 }
 
-// ---- 15. eval metrics ----
+// ---- 11. eval metrics ----
 export function getEvalMetrics(): Promise<EvalMetrics> {
   return request<EvalMetrics>("/eval/metrics");
 }
 
-// ---- 16. run full batch ----
+// ---- 12. run full batch ----
 export function runBatchPipeline(): Promise<RunBatchResponse> {
   return postJson<RunBatchResponse>("/pipeline/run-batch", {});
 }

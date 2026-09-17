@@ -1,17 +1,17 @@
 """Stage 8 - Risk flags.
 
-Computed at READ time (called from GET /api/prospects/{id} and the review
-queue endpoint) rather than persisted, so a flag can never go stale relative
-to the underlying Finding/OutreachDraft rows after an edit -- there is no
-RiskFlag table to keep in sync. Cheap enough to recompute on every read given
-the small per-prospect finding count (well under a dozen rows).
+Computed at READ time (called from GET /api/prospects/{id}) rather than
+persisted, so a flag can never go stale relative to the underlying
+Finding/EmailDraft rows after an edit -- there is no RiskFlag table to keep
+in sync. Cheap enough to recompute on every read given the small per-prospect
+finding count (well under a dozen rows).
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
-from app.models import Company, Finding, FindingSlot, OutreachDraft, Prospect
+from app.models import Company, EmailDraft, Finding, FindingSlot, Prospect
 
 STALE_SOURCE_DAYS = 90
 LOW_CONFIDENCE_THRESHOLD = 0.6
@@ -28,7 +28,7 @@ def compute_risk_flags(
     prospect: Prospect,
     company: Company,
     findings: list[Finding],
-    draft: OutreachDraft | None,
+    draft: EmailDraft | None,
 ) -> list[dict]:
     flags: list[dict] = []
     now = datetime.utcnow()

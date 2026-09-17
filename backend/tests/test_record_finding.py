@@ -3,7 +3,7 @@ record_finding MUST reject any source_url not fetched via `fetch` earlier in
 the same agent session, via a tool_result error -- not an exception.
 
 Exercised directly against app/agent/tools.py::handle_tool_call, with no
-Anthropic API key and no network calls, by manipulating AgentSession state
+OpenAI API key and no network calls, by manipulating AgentSession state
 the same way app/agent/loop.py would after a successful `fetch` call.
 """
 from __future__ import annotations

@@ -1,24 +1,20 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import {
-  getResearchStatus,
-  listProspects,
-  renderProspect,
-  startResearch,
-  synthesizeProspect,
-} from "../api/client";
-import type { ProspectStatus } from "../api/types";
+import { getResearchStatus, listProspects, startResearch } from "../api/client";
+import type { ProspectListItem, ProspectStatus } from "../api/types";
 import { PROSPECT_STATUSES } from "../api/types";
 import StatusBadge from "../components/StatusBadge";
 import HookStrengthBadge from "../components/HookStrengthBadge";
 import { EmptyState, ErrorBanner, Spinner } from "../components/Feedback";
 
-const RESEARCHABLE: ProspectStatus[] = ["QUALIFIED"];
-const SYNTHESIZABLE: ProspectStatus[] = ["RESEARCHED"];
-const RENDERABLE: ProspectStatus[] = ["SYNTHESIZED", "RENDERED", "APPROVED", "EDITED"];
+const IN_FLIGHT_STATUSES = new Set(["RESEARCH_PENDING", "RESEARCHING"]);
 
-function RowActions({ prospectId, status }: { prospectId: string; status: ProspectStatus }) {
+/** The only manual trigger left anywhere in this list: recovering a prospect
+ * that hard-crashed (e.g. missing API key at the time it was queued). Every
+ * normal-path step (qualify, research, generate email) now starts on its
+ * own right after upload. */
+function RetryResearchAction({ prospectId }: { prospectId: string }) {
   const queryClient = useQueryClient();
   const [polling, setPolling] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
@@ -35,15 +31,12 @@ function RowActions({ prospectId, status }: { prospectId: string; status: Prospe
       setPollError(null);
       invalidate();
       try {
-        // Poll research status until DONE/ERROR.
-        // A simple bounded poll loop keeps this self-contained per row
-        // without introducing a global job-tracking store.
         for (let i = 0; i < 60; i++) {
           await new Promise((r) => setTimeout(r, 2000));
           const s = await getResearchStatus(prospectId);
           if (s.status === "DONE" || s.status === "ERROR") {
             if (s.status === "ERROR") {
-              setPollError(s.terminal_reason ?? "Research failed.");
+              setPollError(s.error_message ?? s.terminal_reason ?? "Research failed.");
             }
             break;
           }
@@ -57,74 +50,37 @@ function RowActions({ prospectId, status }: { prospectId: string; status: Prospe
     },
   });
 
-  const synthesizeMutation = useMutation({
-    mutationFn: () => synthesizeProspect(prospectId),
-    onSuccess: invalidate,
-  });
-
-  const renderMutation = useMutation({
-    mutationFn: () => renderProspect(prospectId),
-    onSuccess: invalidate,
-  });
-
-  const busy =
-    researchMutation.isPending ||
-    polling ||
-    synthesizeMutation.isPending ||
-    renderMutation.isPending;
-
   return (
     <div className="flex flex-wrap items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-      {RESEARCHABLE.includes(status) && (
-        <button
-          type="button"
-          className="btn-secondary"
-          disabled={busy}
-          onClick={() => researchMutation.mutate()}
-        >
-          {(researchMutation.isPending || polling) && <Spinner className="mr-1.5" />}
-          Research
-        </button>
-      )}
-      {status === "RESEARCHING" && (
-        <span className="inline-flex items-center gap-1.5 text-xs text-amber-700">
-          <Spinner /> researching…
-        </span>
-      )}
-      {SYNTHESIZABLE.includes(status) && (
-        <button
-          type="button"
-          className="btn-secondary"
-          disabled={busy}
-          onClick={() => synthesizeMutation.mutate()}
-        >
-          {synthesizeMutation.isPending && <Spinner className="mr-1.5" />}
-          Synthesize
-        </button>
-      )}
-      {RENDERABLE.includes(status) && (
-        <button
-          type="button"
-          className="btn-secondary"
-          disabled={busy}
-          onClick={() => renderMutation.mutate()}
-        >
-          {renderMutation.isPending && <Spinner className="mr-1.5" />}
-          Render PDF
-        </button>
-      )}
+      <button
+        type="button"
+        className="btn-secondary"
+        disabled={researchMutation.isPending || polling}
+        onClick={() => researchMutation.mutate()}
+      >
+        {(researchMutation.isPending || polling) && <Spinner className="mr-1.5" />}
+        Retry research
+      </button>
       {pollError && <span className="text-xs text-red-600">{pollError}</span>}
       {researchMutation.isError && (
         <span className="text-xs text-red-600">Failed to start research.</span>
       )}
-      {synthesizeMutation.isError && (
-        <span className="text-xs text-red-600">Failed to synthesize.</span>
-      )}
-      {renderMutation.isError && (
-        <span className="text-xs text-red-600">Failed to render.</span>
-      )}
     </div>
   );
+}
+
+function StatusCell({ status }: { status: ProspectStatus }) {
+  if (status === "ERROR") {
+    return null; // handled by the Actions column's retry button instead
+  }
+  if (IN_FLIGHT_STATUSES.has(status)) {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-amber-700">
+        <Spinner /> in progress…
+      </span>
+    );
+  }
+  return null;
 }
 
 export default function ProspectsList() {
@@ -134,6 +90,11 @@ export default function ProspectsList() {
     queryKey: ["prospects", statusFilter || "all"],
     queryFn: () =>
       listProspects(statusFilter ? (statusFilter as ProspectStatus) : undefined),
+    refetchInterval: (query) => {
+      const data = query.state.data as ProspectListItem[] | undefined;
+      const inFlight = data?.some((p) => IN_FLIGHT_STATUSES.has(p.status));
+      return inFlight ? 3000 : false;
+    },
   });
 
   return (
@@ -159,6 +120,12 @@ export default function ProspectsList() {
           </select>
         </div>
       </div>
+
+      {statusFilter === "EMAIL_DRAFTED" && (
+        <p className="text-sm text-slate-500 -mt-2">
+          These are ready for review — open a prospect to edit or send its email.
+        </p>
+      )}
 
       {prospectsQuery.isLoading && (
         <div className="text-sm text-slate-500 flex items-center gap-2">
@@ -214,7 +181,11 @@ export default function ProspectsList() {
                     <HookStrengthBadge hookStrength={p.hook_strength} showRubricLabel={false} />
                   </td>
                   <td className="px-3 py-2">
-                    <RowActions prospectId={p.prospect_id} status={p.status} />
+                    {p.status === "ERROR" ? (
+                      <RetryResearchAction prospectId={p.prospect_id} />
+                    ) : (
+                      <StatusCell status={p.status} />
+                    )}
                   </td>
                 </tr>
               ))}

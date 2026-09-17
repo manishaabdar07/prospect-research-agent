@@ -6,18 +6,16 @@ without circular imports across files.
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models import (
-    EmailPurpose,
+    EmailDraftStatus,
     ExclusionType,
     FindingSlot,
     ProspectSource,
     ProspectStatus,
-    RejectReason,
-    ReviewActionType,
     RoleBucket,
     Seniority,
     TerminalReason,
@@ -53,6 +51,10 @@ class ProspectSchema(BaseModel):
     source: ProspectSource
     ingested_at: datetime
     status: ProspectStatus
+    qualification_reason: str | None = None
+    qualified_at: datetime | None = None
+    last_error: str | None = None
+    last_error_at: datetime | None = None
 
 
 class FindingSchema(BaseModel):
@@ -80,41 +82,24 @@ class ResearchFindingsSchema(BaseModel):
     tool_calls_used: int = 0
 
 
-class EmailStep(BaseModel):
-    step: int = Field(ge=1, le=3)
-    send_after_days: int
-    subject: str
-    body: str
-    purpose: EmailPurpose
-
-
-class OutreachDraftSchema(BaseModel):
+class EmailDraftSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     prospect_id: str
-    connection_note: str = Field(max_length=280)
-    email_sequence: list[EmailStep] = Field(default_factory=list)
+    subject: str = Field(max_length=500)
+    body: str
     claims_used: list[str] = Field(default_factory=list)
     disqualify: bool = False
     disqualify_reason: str | None = None
+    needs_human_review: bool = False
+    status: EmailDraftStatus
+    created_at: datetime
+    sent_at: datetime | None = None
 
 
 class RiskFlagSchema(BaseModel):
     flag: str
     detail: str
-
-
-class ReviewActionSchema(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    prospect_id: str
-    action: ReviewActionType
-    reject_reason: RejectReason | None = None
-    edited_connection_note: str | None = None
-    edited_email_sequence: list[EmailStep] | None = None
-    edit_distance: int | None = None
-    created_at: datetime
 
 
 class ExclusionEntrySchema(BaseModel):
@@ -139,10 +124,14 @@ class IngestRejection(BaseModel):
 class IngestResponse(BaseModel):
     ingested: int
     rejected: list[IngestRejection]
+    qualified_count: int
+    disqualified_count: int
+    pipeline_started_count: int
 
 
 class QualifyResponse(BaseModel):
     qualified: list[str]
+    disqualified_count: int
     queued_remaining: int
     batch_size: int
 
@@ -163,9 +152,8 @@ class ProspectDetailResponse(BaseModel):
     prospect: ProspectSchema
     company: CompanySchema
     research: ResearchFindingsSchema | None = None
-    draft: OutreachDraftSchema | None = None
+    draft: EmailDraftSchema | None = None
     risk_flags: list[RiskFlagSchema] = Field(default_factory=list)
-    pdf_available: bool = False
 
 
 class ResearchStartResponse(BaseModel):
@@ -176,62 +164,40 @@ class ResearchStatusResponse(BaseModel):
     status: str  # PENDING | RUNNING | DONE | ERROR
     hook_strength: int | None = None
     terminal_reason: TerminalReason | None = None
+    error_message: str | None = None
 
 
-class SynthesizeResponse(BaseModel):
-    status: str  # DONE | DISQUALIFIED | ERROR
-    draft: OutreachDraftSchema | None = None
+class EmailGenerateResponse(BaseModel):
+    status: str  # DONE | DISQUALIFIED | NEEDS_REVIEW | ERROR
+    draft: EmailDraftSchema | None = None
 
 
-class RenderResponse(BaseModel):
-    pdf_url: str
+class EmailDraftEditRequest(BaseModel):
+    subject: str | None = None
+    body: str | None = None
 
 
-class ReviewQueueItem(BaseModel):
-    prospect_id: str
-    full_name: str
-    company_name: str
-    hook_strength: int | None = None
-    pdf_url: str | None = None
-    risk_flags: list[RiskFlagSchema] = Field(default_factory=list)
-
-
-class ApproveResponse(BaseModel):
-    status: str = "APPROVED"
-
-
-class EditRequest(BaseModel):
-    edited_connection_note: str | None = None
-    edited_email_sequence: list[EmailStep] | None = None
-
-
-class EditResponse(BaseModel):
-    status: str = "EDITED"
-    edit_distance: int
-
-
-class RejectRequest(BaseModel):
-    reason: RejectReason
-
-
-class RejectResponse(BaseModel):
-    status: str = "REJECTED"
+class SendEmailResponse(BaseModel):
+    status: str = "SENT"
+    sent_at: datetime
 
 
 class DisqualifiedItem(BaseModel):
     prospect_id: str
     full_name: str
     company_name: str
+    stage: str  # QUALIFICATION | RESEARCH | EMAIL_GENERATION
+    qualification_reason: str | None = None
     hook_strength: int | None = None
     terminal_reason: TerminalReason | None = None
     agent_notes: str | None = None
+    email_disqualify_reason: str | None = None
 
 
 class EvalMetricsResponse(BaseModel):
     hook_recall: float | None = None
     disqualification_precision: float | None = None
     citation_validity: float | None = None
-    avg_edit_distance: float | None = None
 
 
 class RunBatchResponse(BaseModel):
