@@ -7,6 +7,7 @@ tool_call has .id, .function.name, .function.arguments (a JSON string).
 """
 from __future__ import annotations
 
+import copy
 import json
 
 
@@ -50,9 +51,16 @@ class FakeCompletions:
     def __init__(self, responses: list) -> None:
         self._responses = list(responses)
         self.calls = 0
+        # Point-in-time deep copies of the `messages` kwarg on each call, so
+        # a test can assert what history was actually sent on call N without
+        # later in-place mutations (e.g. history compaction) rewriting it
+        # retroactively -- the live `messages` list/dicts are mutated in
+        # place by the loop, so a shallow reference would not do.
+        self.received_messages: list[list[dict]] = []
 
     def create(self, **kwargs):
         self.calls += 1
+        self.received_messages.append(copy.deepcopy(kwargs.get("messages")))
         if not self._responses:
             raise AssertionError("FakeCompletions.create called more times than scripted")
         item = self._responses.pop(0)

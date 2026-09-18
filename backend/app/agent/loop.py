@@ -117,6 +117,23 @@ def _parse_tool_arguments(tc) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _compact_stale_fetch_result(msg: dict) -> None:
+    """Replace a fetched page's full text with a short placeholder once the
+    model has already had one full turn to act on it (the system prompt
+    tells it to call record_finding right away, before its next search/
+    fetch). Without this, every page fetched early in a session gets resent
+    in full on every remaining turn -- the single biggest driver of token
+    growth in a long research session. Safe to do: the citation-integrity
+    check in agent/tools.py is enforced via `session.fetched_urls` (a plain
+    Python set), not by the model re-reading old fetch results here, so
+    compacting history has no effect on which sources can still be cited."""
+    original_len = len(msg.get("content") or "")
+    msg["content"] = (
+        f"[fetched earlier -- {original_len} chars omitted here to save context. "
+        "If you still need this page's text, call fetch on the same URL again.]"
+    )
+
+
 def run_research_agent(
     prospect: Prospect, company: Company, client: openai.OpenAI | None = None
 ) -> AgentRunResult:
@@ -134,6 +151,16 @@ def run_research_agent(
     consecutive_errors = 0
     non_tool_turns = 0
     token_totals = {"prompt": 0, "completion": 0, "total": 0}
+    # Two-stage delay so a fetch's content is compacted only *after* the model
+    # has had one full turn to see and act on it -- not before. A fetch
+    # executed during iteration N is appended to `messages` at the end of N;
+    # the model first sees it when generating iteration N+1's response. So:
+    #   iteration N:   this_turn_fetch_ids = {new fetches from N}
+    #   end of N:      awaiting_first_view -> ready_to_compact (now seen once)
+    #                  this_turn_fetch_ids -> awaiting_first_view (not yet seen)
+    #   top of N+1:    compact ready_to_compact (safe: already seen once)
+    fetch_ids_awaiting_first_view: set[str] = set()
+    fetch_ids_ready_to_compact: set[str] = set()
 
     def assemble(terminal_reason: str, notes: str, hook_strength: int | None = None) -> AgentRunResult:
         if hook_strength is None:
@@ -168,6 +195,12 @@ def run_research_agent(
             return assemble("BUDGET_EXHAUSTED", "Stopped: wall-clock budget exceeded.")
         if session.tool_calls_used >= settings.AGENT_MAX_TOOL_CALLS:
             return assemble("BUDGET_EXHAUSTED", "Stopped: tool-call budget exhausted.")
+
+        if fetch_ids_ready_to_compact:
+            for m in messages:
+                if m.get("role") == "tool" and m.get("tool_call_id") in fetch_ids_ready_to_compact:
+                    _compact_stale_fetch_result(m)
+            fetch_ids_ready_to_compact = set()
 
         try:
             response = client.chat.completions.create(
@@ -217,6 +250,7 @@ def run_research_agent(
 
         tool_result_messages: list[dict] = []
         submitted: AgentRunResult | None = None
+        this_turn_fetch_ids: set[str] = set()
 
         for tc in tool_calls:
             tool_input = _parse_tool_arguments(tc)
@@ -248,6 +282,9 @@ def run_research_agent(
 
             result_text, is_error = handle_tool_call(session, tc.function.name, tool_input)
             tool_result_messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+
+            if tc.function.name == "fetch" and not is_error:
+                this_turn_fetch_ids.add(tc.id)
 
             is_linkedin_rejection = (
                 tc.function.name == "fetch" and "linkedin.com" in str(tool_input.get("url", "")).lower()
@@ -284,3 +321,5 @@ def run_research_agent(
 
         non_tool_turns = 0
         messages.extend(tool_result_messages)
+        fetch_ids_ready_to_compact = fetch_ids_awaiting_first_view
+        fetch_ids_awaiting_first_view = this_turn_fetch_ids
