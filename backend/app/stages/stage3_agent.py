@@ -92,10 +92,22 @@ def run_research_job(prospect_id: str) -> None:
             )
         )
 
-        # "No hook found" (hook_strength < 2) is a first-class outcome: route
-        # straight to DISQUALIFIED and skip Stage 4 entirely.
+        # "No hook found" (hook_strength < 2, terminal_reason SUFFICIENT/
+        # NO_HOOK/BUDGET_EXHAUSTED) is a first-class business outcome: route
+        # straight to DISQUALIFIED and skip Stage 4 entirely. But the agent
+        # loop's own ERROR exit (LLM API failure, or too many consecutive
+        # tool errors -- e.g. a target site blocking every fetch with 403s)
+        # is a system failure, not a business judgment that this prospect is
+        # a bad fit -- same distinction already made below for an unhandled
+        # crash. Route it to ERROR instead so it surfaces as recoverable
+        # (via "Retry research") rather than silently looking identical to a
+        # real "no hook" disqualification.
         if result.hook_strength >= 2:
             prospect.status = ProspectStatus.RESEARCH_COMPLETED
+        elif result.terminal_reason == TerminalReason.ERROR.value:
+            prospect.status = ProspectStatus.ERROR
+            prospect.last_error = result.agent_notes or "Research agent stopped due to repeated tool errors."
+            prospect.last_error_at = datetime.utcnow()
         else:
             prospect.status = ProspectStatus.DISQUALIFIED
 

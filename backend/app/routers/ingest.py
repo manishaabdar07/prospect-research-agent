@@ -30,8 +30,6 @@ async def ingest(
         db,
         background_tasks,
         batch_cap=settings.QUALIFY_BATCH_CAP,
-        headcount_min=settings.QUALIFY_HEADCOUNT_MIN,
-        headcount_max=settings.QUALIFY_HEADCOUNT_MAX,
     )
 
     return IngestResponse(

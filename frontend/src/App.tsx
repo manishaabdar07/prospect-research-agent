@@ -4,6 +4,7 @@ import Dashboard from "./pages/Dashboard";
 import ProspectsList from "./pages/ProspectsList";
 import ProspectDetail from "./pages/ProspectDetail";
 import Disqualified from "./pages/Disqualified";
+import QualificationSettings from "./pages/QualificationSettings";
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
           <Route path="/prospects" element={<ProspectsList />} />
           <Route path="/prospects/:id" element={<ProspectDetail />} />
           <Route path="/disqualified" element={<Disqualified />} />
+          <Route path="/qualification-settings" element={<QualificationSettings />} />
           <Route
             path="*"
             element={

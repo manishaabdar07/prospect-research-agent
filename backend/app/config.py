@@ -40,9 +40,10 @@ class Settings(BaseSettings):
     AGENT_MAX_CONSECUTIVE_ERRORS: int = 2
 
     # --- Qualification knobs (Stage 2) ---
+    # Headcount/city/etc. criteria now live in the qualification_criteria
+    # table (admin-configurable, see app/stages/qualification_engine.py) --
+    # batch sizing stays here since it's an operational knob, not a rule.
     QUALIFY_BATCH_CAP: int = 20
-    QUALIFY_HEADCOUNT_MIN: int = 10
-    QUALIFY_HEADCOUNT_MAX: int = 200
 
     # --- Fetch / extraction ---
     FETCH_TIMEOUT_SECONDS: float = 15.0

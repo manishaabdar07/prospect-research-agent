@@ -131,6 +131,18 @@ export interface CompanyInfo {
   [key: string]: unknown;
 }
 
+export type CriterionStatus = "MATCHED" | "NOT_MATCHED" | "UNKNOWN";
+
+export interface CriterionResult {
+  criterion_name: string;
+  criterion_type: string;
+  expected: unknown;
+  actual: unknown;
+  status: CriterionStatus;
+  reason: string;
+  mandatory: boolean;
+}
+
 export interface ProspectInfo {
   prospect_id?: string;
   company_id?: string;
@@ -143,9 +155,85 @@ export interface ProspectInfo {
   email?: string | null;
   qualification_reason?: string | null;
   qualified_at?: string | null;
+  qualification_details?: CriterionResult[] | null;
+  qualification_campaign_id?: number | null;
+  qualification_campaign_name?: string | null;
   last_error?: string | null;
   last_error_at?: string | null;
   [key: string]: unknown;
+}
+
+// ---- qualification criteria admin ----
+export type CriterionType =
+  | "RANGE"
+  | "LIST"
+  | "EXACT_MATCH"
+  | "CONTAINS"
+  | "BOOLEAN"
+  | "EXCLUSION_LIST"
+  | "DUPLICATE_CHECK";
+
+export const CRITERION_TYPES: CriterionType[] = [
+  "RANGE",
+  "LIST",
+  "EXACT_MATCH",
+  "CONTAINS",
+  "BOOLEAN",
+  "EXCLUSION_LIST",
+  "DUPLICATE_CHECK",
+];
+
+export interface QualificationCriterion {
+  id: number;
+  campaign_id: number;
+  name: string;
+  criterion_type: CriterionType;
+  field: string | null;
+  configuration: Record<string, unknown>;
+  enabled: boolean;
+  mandatory: boolean;
+  priority: number;
+}
+
+export interface QualificationCriterionCreate {
+  name: string;
+  criterion_type: CriterionType;
+  field: string | null;
+  configuration: Record<string, unknown>;
+  enabled: boolean;
+  mandatory: boolean;
+  priority: number;
+}
+
+export interface QualificationCriterionUpdate {
+  name?: string;
+  field?: string | null;
+  configuration?: Record<string, unknown>;
+  enabled?: boolean;
+  mandatory?: boolean;
+  priority?: number;
+}
+
+// ---- qualification campaigns admin ----
+export interface QualificationCampaign {
+  id: number;
+  name: string;
+  description: string;
+  is_active: boolean;
+  min_optional_matches: number | null;
+  criteria: QualificationCriterion[];
+}
+
+export interface QualificationCampaignCreate {
+  name: string;
+  description?: string;
+  min_optional_matches?: number | null;
+}
+
+export interface QualificationCampaignUpdate {
+  name?: string;
+  description?: string;
+  min_optional_matches?: number | null;
 }
 
 export interface ProspectDetail {

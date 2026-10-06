@@ -51,8 +51,6 @@ def qualify_and_launch_pipeline(
     background_tasks: BackgroundTasks,
     *,
     batch_cap: int,
-    headcount_min: int,
-    headcount_max: int,
 ) -> AutoPipelineResult:
     """Qualify every currently-INGESTED prospect (looping past the per-call
     batch cap so a whole upload gets processed, not just the first chunk),
@@ -61,7 +59,7 @@ def qualify_and_launch_pipeline(
     result = AutoPipelineResult()
 
     for _ in range(_MAX_QUALIFY_ITERATIONS):
-        batch = qualify_batch(db, batch_cap=batch_cap, headcount_min=headcount_min, headcount_max=headcount_max)
+        batch = qualify_batch(db, batch_cap=batch_cap)
         result.qualified_ids.extend(batch.qualified_ids)
         result.disqualified_count += batch.disqualified_count
         if batch.queued_remaining == 0:

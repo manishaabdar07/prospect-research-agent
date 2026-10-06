@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import Company, Prospect, ProspectSource, ProspectStatus, RoleBucket, Seniority
 from app.stages import pipeline_runner
+from tests.conftest import seed_default_qualification_criteria
 
 
 class FakeBackgroundTasks:
@@ -42,14 +43,13 @@ def _make_prospect(
 
 
 def test_qualify_and_launch_pipeline_loops_past_batch_cap(db_session):
+    seed_default_qualification_criteria(db_session)
     for i in range(25):
         _make_prospect(db_session, f"pr-{i}", f"co-{i}")
     db_session.commit()
 
     background_tasks = FakeBackgroundTasks()
-    result = pipeline_runner.qualify_and_launch_pipeline(
-        db_session, background_tasks, batch_cap=20, headcount_min=10, headcount_max=200
-    )
+    result = pipeline_runner.qualify_and_launch_pipeline(db_session, background_tasks, batch_cap=20)
 
     assert len(result.qualified_ids) == 25
     assert result.disqualified_count == 0
@@ -62,14 +62,13 @@ def test_qualify_and_launch_pipeline_loops_past_batch_cap(db_session):
 
 
 def test_qualify_and_launch_pipeline_handles_disqualified_too(db_session):
+    seed_default_qualification_criteria(db_session)
     _make_prospect(db_session, "pr-good", "co-good")
     _make_prospect(db_session, "pr-bad", "co-bad", headcount=5)  # below min
     db_session.commit()
 
     background_tasks = FakeBackgroundTasks()
-    result = pipeline_runner.qualify_and_launch_pipeline(
-        db_session, background_tasks, batch_cap=20, headcount_min=10, headcount_max=200
-    )
+    result = pipeline_runner.qualify_and_launch_pipeline(db_session, background_tasks, batch_cap=20)
 
     assert result.qualified_ids == ["pr-good"]
     assert result.disqualified_count == 1

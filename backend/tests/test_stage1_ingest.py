@@ -81,7 +81,7 @@ def test_ingest_csv_happy_path(db_session):
 
 CSV_WITH_REJECTIONS = """Name,Company,Title,City
 ,Some Company,CTO,Pune
-John Doe,,CTO,Pune
+John Doe,,CTO,Pune  1 
 Jane Roe,Widgets Inc,Head of HR,Pune
 """
 

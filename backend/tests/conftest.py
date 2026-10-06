@@ -18,6 +18,50 @@ from sqlalchemy.pool import StaticPool
 from app import models  # noqa: F401  (ensure models are registered on Base.metadata)
 from app.database import Base, get_db
 from app.main import app
+from app.models import QualificationCampaign, QualificationCriteria
+
+# Mirrors alembic/versions/0004_qualification_campaigns.py's seed data --
+# `Base.metadata.create_all()` (below) creates the tables but does not run
+# migration data seeds, so tests that exercise Stage 2 qualify need to seed
+# these explicitly to get the same default behavior production starts with.
+PUNE_METRO_ALLOWLIST = [
+    "pune", "pimpri-chinchwad", "chakan", "hinjewadi", "talegaon", "ranjangaon",
+    "chikhali", "wagholi", "hadapsar", "baner", "kharadi", "bhosari", "manjari", "shirwal",
+]
+
+
+def seed_default_qualification_criteria(
+    db: Session, *, headcount_min: int = 10, headcount_max: int = 200
+) -> QualificationCampaign:
+    """Seeds one active "Default" campaign with the same 4 criteria the
+    original hardcoded Stage 2 logic checked, all mandatory=True (which
+    reproduces the old ALL-mode behavior exactly). Returns the campaign so a
+    test can add more criteria to it or create additional campaigns."""
+    campaign = QualificationCampaign(name="Default", is_active=True, min_optional_matches=None)
+    db.add(campaign)
+    db.flush()
+    db.add_all(
+        [
+            QualificationCriteria(
+                campaign_id=campaign.id, name="Headcount Band", criterion_type="RANGE", field="company.headcount",
+                configuration={"min": headcount_min, "max": headcount_max}, enabled=True, mandatory=True, priority=10,
+            ),
+            QualificationCriteria(
+                campaign_id=campaign.id, name="City Allowlist", criterion_type="LIST", field="company.city",
+                configuration={"allowed_values": PUNE_METRO_ALLOWLIST}, enabled=True, mandatory=True, priority=20,
+            ),
+            QualificationCriteria(
+                campaign_id=campaign.id, name="Exclusion List", criterion_type="EXCLUSION_LIST", field=None,
+                configuration={}, enabled=True, mandatory=True, priority=30,
+            ),
+            QualificationCriteria(
+                campaign_id=campaign.id, name="Duplicate Check", criterion_type="DUPLICATE_CHECK", field=None,
+                configuration={}, enabled=True, mandatory=True, priority=40,
+            ),
+        ]
+    )
+    db.commit()
+    return campaign
 
 
 @pytest.fixture()

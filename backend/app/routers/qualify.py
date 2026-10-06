@@ -12,14 +12,9 @@ router = APIRouter(tags=["qualify"])
 
 
 @router.post("/qualify", response_model=QualifyResponse)
-def qualify(_body: QualifyRequest = QualifyRequest(), db: Session = Depends(get_db)) -> QualifyResponse:
+def qualify(body: QualifyRequest = QualifyRequest(), db: Session = Depends(get_db)) -> QualifyResponse:
     settings = get_settings()
-    result = qualify_batch(
-        db,
-        batch_cap=settings.QUALIFY_BATCH_CAP,
-        headcount_min=settings.QUALIFY_HEADCOUNT_MIN,
-        headcount_max=settings.QUALIFY_HEADCOUNT_MAX,
-    )
+    result = qualify_batch(db, batch_cap=settings.QUALIFY_BATCH_CAP, campaign_id=body.campaign_id)
     return QualifyResponse(
         qualified=result.qualified_ids,
         disqualified_count=result.disqualified_count,

@@ -14,11 +14,11 @@ from app.models import (
     RoleBucket,
     Seniority,
 )
+from app.models import QualificationCampaign, QualificationCriteria
 from app.stages.stage2_qualify import qualify_batch
+from tests.conftest import seed_default_qualification_criteria
 
 BATCH_CAP = 20
-HC_MIN = 10
-HC_MAX = 200
 
 
 def _make_company(db, company_id: str, *, headcount, city: str, name: str | None = None) -> Company:
@@ -54,7 +54,8 @@ def _make_prospect(
 
 
 def _run(db):
-    return qualify_batch(db, batch_cap=BATCH_CAP, headcount_min=HC_MIN, headcount_max=HC_MAX)
+    seed_default_qualification_criteria(db)
+    return qualify_batch(db, batch_cap=BATCH_CAP)
 
 
 def test_qualify_passes_valid_candidate(db_session):
@@ -234,3 +235,59 @@ def test_qualify_batch_cap_is_a_true_short_circuit_even_for_failing_candidates(d
     for p in untouched:
         assert p.status == ProspectStatus.INGESTED
         assert p.qualification_reason is None
+
+
+def test_qualify_batch_targets_a_specific_campaign_by_id(db_session):
+    """An explicit campaign_id is used even when a different campaign is
+    active -- lets one ad-hoc run use a saved campaign without flipping
+    which one is globally active."""
+    seed_default_qualification_criteria(db_session)  # active "Default": headcount 10-200, Pune only
+
+    lenient = QualificationCampaign(name="Lenient", is_active=False, min_optional_matches=None)
+    db_session.add(lenient)
+    db_session.flush()
+    db_session.add(
+        QualificationCriteria(
+            campaign_id=lenient.id, name="Headcount Band", criterion_type="RANGE", field="company.headcount",
+            configuration={"min": 1, "max": 10000}, enabled=True, mandatory=True, priority=10,
+        )
+    )
+    db_session.commit()
+
+    # Would fail the active "Default" campaign (headcount way over 200), but
+    # should pass "Lenient".
+    _make_company(db_session, "co-1", headcount=5000, city="Mumbai")
+    _make_prospect(db_session, "pr-1", "co-1")
+    db_session.commit()
+
+    result = qualify_batch(db_session, batch_cap=BATCH_CAP, campaign_id=lenient.id)
+
+    assert result.qualified_ids == ["pr-1"]
+    p = db_session.get(Prospect, "pr-1")
+    assert p.qualification_campaign_id == lenient.id
+    assert p.qualification_campaign_name == "Lenient"
+
+
+def test_editing_a_campaign_after_qualifying_does_not_change_the_frozen_breakdown(db_session):
+    campaign = seed_default_qualification_criteria(db_session)
+    _make_company(db_session, "co-1", headcount=50, city="Pune")
+    _make_prospect(db_session, "pr-1", "co-1")
+    db_session.commit()
+
+    qualify_batch(db_session, batch_cap=BATCH_CAP)
+    p = db_session.get(Prospect, "pr-1")
+    assert p.status == ProspectStatus.QUALIFIED
+    frozen_details = p.qualification_details
+    frozen_campaign_name = p.qualification_campaign_name
+    assert frozen_campaign_name == "Default"
+
+    # Now tighten the campaign so this same prospect would fail if
+    # re-evaluated -- but it's already left INGESTED, so it never is.
+    headcount_criterion = next(c for c in campaign.criteria if c.name == "Headcount Band")
+    headcount_criterion.configuration = {"min": 1000, "max": 2000}
+    campaign.name = "Renamed Campaign"
+    db_session.commit()
+
+    db_session.refresh(p)
+    assert p.qualification_details == frozen_details
+    assert p.qualification_campaign_name == "Default"  # survives the rename

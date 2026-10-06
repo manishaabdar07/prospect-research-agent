@@ -7,10 +7,12 @@ without circular imports across files.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models import (
+    CriterionType,
     EmailDraftStatus,
     ExclusionType,
     FindingSlot,
@@ -37,6 +39,21 @@ class CompanySchema(BaseModel):
     industry_raw: str = ""
 
 
+class CriterionResultSchema(BaseModel):
+    """One row of a prospect's Stage 2 per-criterion breakdown, mirroring
+    qualification_engine.CriterionResult exactly (stored as plain JSON on
+    Prospect.qualification_details, so this schema is what shapes it back
+    out over the API)."""
+
+    criterion_name: str
+    criterion_type: str
+    expected: Any = None
+    actual: Any = None
+    status: str  # MATCHED | NOT_MATCHED | UNKNOWN
+    reason: str
+    mandatory: bool = True
+
+
 class ProspectSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -53,6 +70,9 @@ class ProspectSchema(BaseModel):
     status: ProspectStatus
     qualification_reason: str | None = None
     qualified_at: datetime | None = None
+    qualification_details: list[CriterionResultSchema] | None = None
+    qualification_campaign_id: int | None = None
+    qualification_campaign_name: str | None = None
     last_error: str | None = None
     last_error_at: datetime | None = None
 
@@ -109,6 +129,66 @@ class ExclusionEntrySchema(BaseModel):
     type: ExclusionType
     value: str
     reason: str = ""
+
+
+class QualificationCriterionSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    campaign_id: int
+    name: str
+    criterion_type: CriterionType
+    field: str | None = None
+    configuration: dict = Field(default_factory=dict)
+    enabled: bool = True
+    mandatory: bool = True
+    priority: int = 0
+
+
+class QualificationCriterionCreate(BaseModel):
+    name: str
+    criterion_type: CriterionType
+    field: str | None = None
+    configuration: dict = Field(default_factory=dict)
+    enabled: bool = True
+    mandatory: bool = True
+    priority: int = 0
+
+
+class QualificationCriterionUpdate(BaseModel):
+    """All fields optional -- only what's supplied gets patched, including
+    enable/disable and mandatory/optional (no separate endpoints for those,
+    per project convention)."""
+
+    name: str | None = None
+    field: str | None = None
+    configuration: dict | None = None
+    enabled: bool | None = None
+    mandatory: bool | None = None
+    priority: int | None = None
+
+
+class QualificationCampaignSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str = ""
+    is_active: bool = False
+    min_optional_matches: int | None = None
+    criteria: list[QualificationCriterionSchema] = Field(default_factory=list)
+
+
+class QualificationCampaignCreate(BaseModel):
+    name: str
+    description: str = ""
+    min_optional_matches: int | None = None
+
+
+class QualificationCampaignUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    min_optional_matches: int | None = None
 
 
 # --------------------------------------------------------------------------
@@ -205,9 +285,11 @@ class RunBatchResponse(BaseModel):
 
 
 class QualifyRequest(BaseModel):
-    """Empty body per spec (`POST /api/qualify` with body `{}`)."""
+    """Body defaults to `{}` (matches the original spec's empty-body
+    contract) -- campaign_id optionally targets a specific saved campaign
+    for this one call, without changing which campaign is globally active."""
 
-    pass
+    campaign_id: int | None = None
 
 
 class PipelineRunBatchRequest(BaseModel):

@@ -139,6 +139,45 @@ export default function ProspectDetail() {
         />
       )}
 
+      {prospect.qualification_details && prospect.qualification_details.length > 0 && (
+        <section>
+          <div className="flex items-center gap-2 mb-2 flex-wrap">
+            <h2 className="text-sm font-semibold text-slate-800">
+              Qualification breakdown
+            </h2>
+            {prospect.qualification_campaign_name && (
+              <span className="text-xs text-slate-400">
+                evaluated under campaign: {prospect.qualification_campaign_name}
+              </span>
+            )}
+          </div>
+          <div className="rounded-md border border-slate-200 divide-y divide-slate-100 bg-white">
+            {prospect.qualification_details.map((r, i) => (
+              <div key={i} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
+                <span className="text-slate-700">
+                  {r.criterion_name}{" "}
+                  <span className="text-xs text-slate-400">
+                    ({r.mandatory ? "mandatory" : "optional"})
+                  </span>
+                </span>
+                <span
+                  className={
+                    r.status === "MATCHED"
+                      ? "text-emerald-700"
+                      : r.status === "UNKNOWN"
+                        ? "text-slate-400"
+                        : "text-red-600"
+                  }
+                  title={r.reason}
+                >
+                  {r.status === "MATCHED" ? "✓ MATCHED" : r.status === "UNKNOWN" ? "? UNKNOWN" : "✗ NOT MATCHED"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       {risk_flags && risk_flags.length > 0 && (
         <section>
           <h2 className="text-sm font-semibold text-slate-800 mb-2">

@@ -4,6 +4,7 @@ const links = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/prospects", label: "Prospects" },
   { to: "/disqualified", label: "Disqualified" },
+  { to: "/qualification-settings", label: "Qualification" },
 ];
 
 function linkClass(isActive: boolean): string {

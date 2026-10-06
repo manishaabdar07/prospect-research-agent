@@ -30,12 +30,7 @@ def run_batch(
     db: Session = Depends(get_db),
 ) -> RunBatchResponse:
     settings = get_settings()
-    result = qualify_batch(
-        db,
-        batch_cap=settings.QUALIFY_BATCH_CAP,
-        headcount_min=settings.QUALIFY_HEADCOUNT_MIN,
-        headcount_max=settings.QUALIFY_HEADCOUNT_MAX,
-    )
+    result = qualify_batch(db, batch_cap=settings.QUALIFY_BATCH_CAP)
 
     for prospect_id in result.qualified_ids:
         background_tasks.add_task(run_full_pipeline_for_prospect, prospect_id)

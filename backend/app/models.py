@@ -103,6 +103,26 @@ class ExclusionType(str, enum.Enum):
     PROSPECT = "PROSPECT"
 
 
+class CriterionType(str, enum.Enum):
+    """The 5 generic field-based evaluators, plus 2 special gates that stay
+    wired to their own DB-lookup logic (app/stages/qualification_engine.py)
+    rather than being forced into a field/value comparison shape."""
+
+    RANGE = "RANGE"
+    LIST = "LIST"
+    EXACT_MATCH = "EXACT_MATCH"
+    CONTAINS = "CONTAINS"
+    BOOLEAN = "BOOLEAN"
+    EXCLUSION_LIST = "EXCLUSION_LIST"
+    DUPLICATE_CHECK = "DUPLICATE_CHECK"
+
+
+class CriterionStatus(str, enum.Enum):
+    MATCHED = "MATCHED"
+    NOT_MATCHED = "NOT_MATCHED"
+    UNKNOWN = "UNKNOWN"
+
+
 # --------------------------------------------------------------------------
 # Core entities
 # --------------------------------------------------------------------------
@@ -145,6 +165,23 @@ class Prospect(Base):
     # background-job failures). See module docstring.
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Per-criterion breakdown from the one Stage 2 evaluation this prospect
+    # ever gets (a prospect leaves INGESTED for good, so there's no need to
+    # track history across multiple runs) -- list[dict] shaped like
+    # qualification_engine.CriterionResult. None for prospects qualified
+    # before this column existed, or not yet evaluated at all.
+    qualification_details: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # Which campaign produced the evaluation above. qualification_campaign_id
+    # is nullable and ON DELETE SET NULL (a deleted campaign shouldn't corrupt
+    # history); qualification_campaign_name is a frozen text snapshot taken
+    # at evaluation time so the label survives a later campaign rename or
+    # deletion -- a prospect's breakdown stays fully self-describing.
+    qualification_campaign_id: Mapped[int | None] = mapped_column(
+        ForeignKey("qualification_campaigns.id", ondelete="SET NULL"), nullable=True
+    )
+    qualification_campaign_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     company: Mapped["Company"] = relationship(back_populates="prospects")
     findings: Mapped[list["Finding"]] = relationship(back_populates="prospect", cascade="all, delete-orphan")
@@ -233,6 +270,68 @@ class ExclusionEntry(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class QualificationCampaign(Base):
+    """A named, saved set of Stage 2 qualification criteria + decision rule.
+
+    Exactly one campaign is active at a time (enforced in the /activate
+    endpoint, not a DB constraint) -- the automatic post-ingest pipeline
+    always qualifies against whichever campaign is active. A specific
+    (possibly inactive) campaign can also be targeted for one ad-hoc
+    `POST /api/qualify` call via its id.
+
+    min_optional_matches is "the qualification rule": None means every
+    enabled optional criterion must also MATCH (on top of every mandatory
+    criterion always having to MATCH); a number means only that many of the
+    optional criteria need to MATCH. See qualification_engine.decide().
+    """
+
+    __tablename__ = "qualification_campaigns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    min_optional_matches: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    criteria: Mapped[list["QualificationCriteria"]] = relationship(
+        back_populates="campaign", cascade="all, delete-orphan"
+    )
+
+
+class QualificationCriteria(Base):
+    """Admin-configurable Stage 2 qualification rule, belonging to exactly
+    one QualificationCampaign.
+
+    `field` is a dotted name into qualification_engine.FIELD_ACCESSORS (e.g.
+    "company.headcount") -- an allowlist, not arbitrary attribute access, so
+    DB-driven config can never become code execution. Unused (None) for the
+    EXCLUSION_LIST/DUPLICATE_CHECK types, which dispatch to their own
+    existing DB-lookup functions instead of a field/value comparison.
+    `configuration` shape depends on criterion_type, e.g. {"min": 10, "max":
+    200} for RANGE, {"allowed_values": [...]} for LIST/CONTAINS.
+    `mandatory` (default True) determines whether a failure here is a hard
+    gate or merely counts toward the campaign's min_optional_matches.
+    """
+
+    __tablename__ = "qualification_criteria"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("qualification_campaigns.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    criterion_type: Mapped[CriterionType] = mapped_column(Enum(CriterionType, native_enum=False), nullable=False)
+    field: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    configuration: Mapped[dict] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    mandatory: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    campaign: Mapped["QualificationCampaign"] = relationship(back_populates="criteria")
+
+
 class CRMTask(Base):
     """Stage 6 Load: v1 CRM task table (see app/crm.py::PostgresCRMAdapter)."""
 
@@ -254,11 +353,15 @@ __all__ = [
     "TerminalReason",
     "EmailDraftStatus",
     "ExclusionType",
+    "CriterionType",
+    "CriterionStatus",
     "Company",
     "Prospect",
     "Finding",
     "ResearchFindings",
     "EmailDraft",
     "ExclusionEntry",
+    "QualificationCampaign",
+    "QualificationCriteria",
     "CRMTask",
 ]

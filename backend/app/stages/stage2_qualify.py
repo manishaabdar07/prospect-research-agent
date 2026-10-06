@@ -1,58 +1,38 @@
-"""Stage 2 - Qualify (plain code, no LLM).
+"""Stage 2 - Qualify: orchestration only. Rule evaluation lives in
+app/stages/qualification_engine.py, driven by a DB-configured
+QualificationCampaign's criteria instead of hardcoded values (see that
+module's docstring for the rationale and the field allowlist that keeps
+DB-driven config from becoming arbitrary code execution).
 
-Judgment calls (see README for the full list):
-- Unknown/null headcount is FAIL-CLOSED: a company with no headcount data
-  does NOT auto-pass qualification. Rationale: the spec's qualification
-  criterion is a headcount band (10-200), and silently passing unknowns
-  would let arbitrarily large or tiny companies into the batch, defeating
-  the point of the filter. This can be revisited once a headcount-enrichment
-  step exists.
-- Dedupe order: linkedin_url first (strong identity signal when present),
-  then (full_name, company_id) as a fallback for prospects without a
-  LinkedIn URL.
-- Batch cap is a hard 20, enforced as a true short-circuit: once that many
-  prospects have been evaluated and qualified, the rest of the INGESTED queue
-  is left completely untouched (status stays INGESTED, qualification_reason
-  stays None) for the next qualify run, rather than being evaluated now and
-  discarded. "queued_remaining" therefore means "not yet evaluated," not
-  "evaluated and passed but didn't fit."
+Multiple campaigns can be saved; exactly one is "active" at a time and is
+what the automatic post-ingest pipeline always qualifies against (see
+app/stages/pipeline_runner.py). A specific campaign_id can also be passed
+for a one-off `POST /api/qualify` call without changing which one is active.
+
+Judgment calls that still apply (see README for the full list):
+- Batch cap is a hard limit (default 20, configurable via QUALIFY_BATCH_CAP),
+  enforced as a true short-circuit: once that many prospects have been
+  evaluated and qualified, the rest of the INGESTED queue is left completely
+  untouched (status stays INGESTED, qualification_reason stays None) for the
+  next qualify run, rather than being evaluated now and discarded.
+  "queued_remaining" therefore means "not yet evaluated," not "evaluated and
+  passed but didn't fit."
 - Every prospect actually evaluated (pass or fail) gets a qualification_reason
   and qualified_at timestamp, so a human can see why a prospect landed where
-  it did -- previously a failing prospect just stayed at INGESTED forever with
-  no recorded reason, which was indistinguishable from "not processed yet."
+  it did.
+- A prospect's qualification_details/qualification_campaign_name are a frozen
+  snapshot taken at evaluation time -- later edits to that campaign never
+  change an already-evaluated prospect's stored breakdown.
 """
 from __future__ import annotations
 
-import re
 from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Company, ExclusionEntry, ExclusionType, Prospect, ProspectStatus
-
-# Pune-metro allowlist. Compared case-insensitively against the normalized
-# city value set by Stage 1. Extend this set as the target geography grows.
-PUNE_METRO_ALLOWLIST = {
-    "pune",
-    "pimpri-chinchwad",
-    "chakan",
-    "hinjewadi",
-    "talegaon",
-    "ranjangaon",
-    "chikhali",
-    "wagholi",
-    "hadapsar",
-    "baner",
-    "kharadi",
-    "bhosari",
-    "manjari",
-    "shirwal",
-}
-
-
-def _normalize_city(city: str) -> str:
-    return re.sub(r"\s+", " ", (city or "").strip().lower())
+from app.models import Company, Prospect, ProspectStatus, QualificationCampaign
+from app.stages.qualification_engine import decide, evaluate_prospect
 
 
 class QualifyResult:
@@ -63,91 +43,34 @@ class QualifyResult:
         self.batch_size = 0
 
 
-def _headcount_ok(headcount: int | None, hc_min: int, hc_max: int) -> bool:
-    if headcount is None:
-        return False  # fail-closed: unknown headcount does not qualify
-    return hc_min <= headcount <= hc_max
+def _load_campaign(db: Session, campaign_id: int | None) -> QualificationCampaign:
+    if campaign_id is not None:
+        campaign = db.get(QualificationCampaign, campaign_id)
+        if campaign is not None:
+            return campaign
+        # Falls through to the active-campaign lookup below if the given id
+        # doesn't exist -- same defensive spirit as the "no active campaign"
+        # fallback, rather than raising and stalling the whole batch.
+
+    campaign = db.scalars(select(QualificationCampaign).where(QualificationCampaign.is_active.is_(True))).first()
+    if campaign is None:
+        # Defensive fallback only -- the 0004 migration always seeds one
+        # active "Default" campaign. An empty campaign (no criteria) means
+        # every prospect trivially qualifies (no mandatory/optional checks to
+        # fail), which is at least a visible, inspectable state rather than
+        # qualify_batch erroring out and stalling the auto pipeline.
+        campaign = QualificationCampaign(name="Default", is_active=True, min_optional_matches=None)
+        db.add(campaign)
+        db.flush()
+    return campaign
 
 
-def _city_ok(city: str) -> bool:
-    return _normalize_city(city) in PUNE_METRO_ALLOWLIST
-
-
-def _matched_exclusion(db: Session, prospect: Prospect, company: Company) -> ExclusionEntry | None:
-    exclusions = db.scalars(select(ExclusionEntry)).all()
-    for entry in exclusions:
-        value_norm = entry.value.strip().lower()
-        if entry.type == ExclusionType.COMPANY and company.name.strip().lower() == value_norm:
-            return entry
-        if entry.type == ExclusionType.PROSPECT and prospect.full_name.strip().lower() == value_norm:
-            return entry
-    return None
-
-
-def _matched_duplicate(db: Session, prospect: Prospect) -> Prospect | None:
-    """Dedupe against existing (already-evaluated) DB records.
-
-    linkedin_url first, then (full_name, company_id) fallback. Only compares
-    against prospects that have already left INGESTED (i.e. were evaluated in
-    a prior qualify run), so two freshly-ingested rows for the same person in
-    the *same* CSV batch don't get silently cross-dropped against each other.
-    """
-    query = select(Prospect).where(
-        Prospect.prospect_id != prospect.prospect_id,
-        Prospect.status != ProspectStatus.INGESTED,
-    )
-    existing = db.scalars(query).all()
-
-    if prospect.linkedin_url:
-        for other in existing:
-            if other.linkedin_url and other.linkedin_url.strip().lower() == prospect.linkedin_url.strip().lower():
-                return other
-        return None  # has a linkedin_url and no match found -> not a dup via this path
-
-    for other in existing:
-        if (
-            other.full_name.strip().lower() == prospect.full_name.strip().lower()
-            and other.company_id == prospect.company_id
-        ):
-            return other
-    return None
-
-
-def _disqualify_reason(
-    db: Session, prospect: Prospect, company: Company, headcount_min: int, headcount_max: int
-) -> str | None:
-    """Return a specific reason if `prospect` fails qualification, else None."""
-    if not _headcount_ok(company.headcount, headcount_min, headcount_max):
-        if company.headcount is None:
-            return "Company headcount is unknown; cannot confirm it is within the supported range."
-        return f"Headcount {company.headcount} is outside the supported range [{headcount_min}, {headcount_max}]."
-
-    if not _city_ok(company.city):
-        return f"City '{company.city}' is not in the supported Pune-metro area."
-
-    exclusion = _matched_exclusion(db, prospect, company)
-    if exclusion is not None:
-        target = "company" if exclusion.type == ExclusionType.COMPANY else "prospect"
-        reason_text = exclusion.reason or exclusion.value
-        return f"Matches {target} exclusion list entry: {reason_text}."
-
-    duplicate = _matched_duplicate(db, prospect)
-    if duplicate is not None:
-        matched_via = "LinkedIn URL" if prospect.linkedin_url else "name + company"
-        return f"Duplicate of existing prospect {duplicate.prospect_id} ({duplicate.full_name}), matched by {matched_via}."
-
-    return None
-
-
-def qualify_batch(
-    db: Session,
-    *,
-    batch_cap: int = 20,
-    headcount_min: int = 10,
-    headcount_max: int = 200,
-) -> QualifyResult:
+def qualify_batch(db: Session, *, batch_cap: int = 20, campaign_id: int | None = None) -> QualifyResult:
     result = QualifyResult()
     now = datetime.utcnow()
+
+    campaign = _load_campaign(db, campaign_id)
+    criteria = list(campaign.criteria)
 
     candidates = db.scalars(
         select(Prospect).where(Prospect.status == ProspectStatus.INGESTED).order_by(Prospect.ingested_at.asc())
@@ -165,11 +88,16 @@ def qualify_batch(
             # untouched rather than recording a misleading reason.
             continue
 
-        reason = _disqualify_reason(db, prospect, company, headcount_min, headcount_max)
+        criterion_results = evaluate_prospect(db, prospect, company, criteria)
+        qualified, reason = decide(criterion_results, campaign.min_optional_matches)
+
         prospect.qualified_at = now
-        if reason is None:
+        prospect.qualification_details = [r.to_dict() for r in criterion_results]
+        prospect.qualification_campaign_id = campaign.id
+        prospect.qualification_campaign_name = campaign.name
+        if qualified:
             prospect.status = ProspectStatus.QUALIFIED
-            prospect.qualification_reason = "Passed all qualification checks."
+            prospect.qualification_reason = reason
             result.qualified_ids.append(prospect.prospect_id)
             result.batch_size += 1
         else:
