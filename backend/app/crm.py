@@ -11,7 +11,6 @@ without touching calling code.
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 from typing import Protocol
 
 from sqlalchemy.orm import Session
@@ -22,7 +21,6 @@ from app.models import Company, CRMTask, Prospect
 class CRMAdapter(Protocol):
     def upsert_company(self, c: Company) -> str: ...
     def upsert_contact(self, p: Prospect, company_ref: str) -> str: ...
-    def attach_file(self, contact_ref: str, path: Path) -> None: ...
     def create_task(self, contact_ref: str, title: str, due: date) -> None: ...
 
 
@@ -58,16 +56,6 @@ class PostgresCRMAdapter:
             existing.company_id = company_ref
         self.db.commit()
         return p.prospect_id
-
-    def attach_file(self, contact_ref: str, path: Path) -> None:
-        from datetime import datetime
-
-        prospect = self.db.get(Prospect, contact_ref)
-        if prospect is None:
-            raise ValueError(f"unknown prospect_id {contact_ref}")
-        prospect.pdf_path = str(path)
-        prospect.pdf_generated_at = datetime.utcnow()
-        self.db.commit()
 
     def create_task(self, contact_ref: str, title: str, due: date) -> None:
         task = CRMTask(contact_ref=contact_ref, title=title, due=due)

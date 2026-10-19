@@ -1,16 +1,12 @@
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  getEvalMetrics,
-  ingestCsv,
-  listProspects,
-  runBatchPipeline,
-  runQualify,
-} from "../api/client";
-import type { IngestResponse, QualifyResponse } from "../api/types";
+import { getEvalMetrics, ingestCsv, listProspects } from "../api/client";
+import type { IngestResponse, ProspectListItem } from "../api/types";
 import { PROSPECT_STATUSES } from "../api/types";
 import { Spinner, ErrorBanner } from "../components/Feedback";
 import StatusBadge from "../components/StatusBadge";
+
+const IN_FLIGHT_STATUSES = new Set(["RESEARCH_PENDING", "RESEARCHING"]);
 
 function MetricTile({
   label,
@@ -41,6 +37,11 @@ export default function Dashboard() {
   const prospectsQuery = useQuery({
     queryKey: ["prospects", "all"],
     queryFn: () => listProspects(),
+    refetchInterval: (query) => {
+      const data = query.state.data as ProspectListItem[] | undefined;
+      const inFlight = data?.some((p) => IN_FLIGHT_STATUSES.has(p.status));
+      return inFlight ? 3000 : false;
+    },
   });
 
   const metricsQuery = useQuery({
@@ -51,20 +52,6 @@ export default function Dashboard() {
 
   const ingestMutation = useMutation({
     mutationFn: (file: File) => ingestCsv(file),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["prospects"] });
-    },
-  });
-
-  const qualifyMutation = useMutation({
-    mutationFn: runQualify,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["prospects"] });
-    },
-  });
-
-  const runBatchMutation = useMutation({
-    mutationFn: runBatchPipeline,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["prospects"] });
     },
@@ -87,17 +74,17 @@ export default function Dashboard() {
   }
 
   const ingestResult: IngestResponse | undefined = ingestMutation.data;
-  const qualifyResult: QualifyResponse | undefined = qualifyMutation.data;
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-6 space-y-6">
       <div>
         <h1 className="text-xl font-semibold text-slate-900">Pipeline</h1>
         <p className="text-sm text-slate-500 mt-1">
-          Upload a prospect CSV, qualify a batch, then run research and
-          synthesis per prospect from the Prospects page. This tool never
-          sends anything on its own — every outbound email is reviewed and
-          sent by a human from the Review Queue.
+          Upload is the only manual step. Every ingested prospect is
+          automatically qualified, researched, and has an email generated if
+          it qualifies — no further clicks needed. Nothing is ever sent
+          automatically — every email is reviewed, edited if needed, and
+          sent by a human from the prospect's own page.
         </p>
       </div>
 
@@ -106,12 +93,14 @@ export default function Dashboard() {
           {/* CSV upload */}
           <section className="card p-5">
             <h2 className="text-sm font-semibold text-slate-800 mb-1">
-              1. Ingest prospects
+              Upload prospects
             </h2>
             <p className="text-sm text-slate-500 mb-3">
               Upload a CSV with columns for name, title and company. Rows
               that fail basic cleaning are rejected with a reason and can be
-              fixed and re-uploaded.
+              fixed and re-uploaded. Everything else — qualify, research,
+              email generation — starts automatically the moment the upload
+              finishes.
             </p>
             <div className="flex items-center gap-3">
               <input
@@ -128,7 +117,7 @@ export default function Dashboard() {
                 onClick={handleUpload}
               >
                 {ingestMutation.isPending && <Spinner className="mr-1.5" />}
-                Upload &amp; ingest
+                Upload &amp; start processing
               </button>
             </div>
 
@@ -148,7 +137,13 @@ export default function Dashboard() {
               <div className="mt-4 space-y-2">
                 <div className="text-sm text-emerald-700 font-medium">
                   Ingested {ingestResult.ingested} prospect
-                  {ingestResult.ingested === 1 ? "" : "s"}.
+                  {ingestResult.ingested === 1 ? "" : "s"}. Qualified{" "}
+                  {ingestResult.qualified_count}, disqualified{" "}
+                  {ingestResult.disqualified_count}. Research and email
+                  generation started automatically for{" "}
+                  {ingestResult.pipeline_started_count} prospect
+                  {ingestResult.pipeline_started_count === 1 ? "" : "s"} —
+                  watch progress on the Prospects page.
                 </div>
                 {ingestResult.rejected.length > 0 && (
                   <div>
@@ -184,87 +179,6 @@ export default function Dashboard() {
                     </div>
                   </div>
                 )}
-              </div>
-            )}
-          </section>
-
-          {/* Qualify + run batch */}
-          <section className="card p-5">
-            <h2 className="text-sm font-semibold text-slate-800 mb-1">
-              2. Qualify a batch
-            </h2>
-            <p className="text-sm text-slate-500 mb-3">
-              Filters and dedupes ingested prospects down to a qualified
-              batch (~20) ready for research.
-            </p>
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                className="btn-primary"
-                disabled={qualifyMutation.isPending}
-                onClick={() => qualifyMutation.mutate()}
-              >
-                {qualifyMutation.isPending && <Spinner className="mr-1.5" />}
-                Run qualify
-              </button>
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={runBatchMutation.isPending}
-                onClick={() => runBatchMutation.mutate()}
-                title="Convenience action: runs qualify + research + synthesis + render across the queued batch on the backend"
-              >
-                {runBatchMutation.isPending && <Spinner className="mr-1.5" />}
-                Run full batch pipeline
-              </button>
-            </div>
-
-            {qualifyMutation.isError && (
-              <div className="mt-3">
-                <ErrorBanner
-                  message={
-                    qualifyMutation.error instanceof Error
-                      ? qualifyMutation.error.message
-                      : "Failed to run qualify."
-                  }
-                />
-              </div>
-            )}
-
-            {qualifyResult && (
-              <div className="mt-3 text-sm text-slate-700 space-y-0.5">
-                <div>
-                  Qualified{" "}
-                  <span className="font-semibold">
-                    {qualifyResult.qualified.length}
-                  </span>{" "}
-                  prospect{qualifyResult.qualified.length === 1 ? "" : "s"} into
-                  this batch (batch size {qualifyResult.batch_size}).
-                </div>
-                <div className="text-slate-500">
-                  {qualifyResult.queued_remaining} prospect
-                  {qualifyResult.queued_remaining === 1 ? "" : "s"} still
-                  queued for a future batch.
-                </div>
-              </div>
-            )}
-
-            {runBatchMutation.isError && (
-              <div className="mt-3">
-                <ErrorBanner
-                  message={
-                    runBatchMutation.error instanceof Error
-                      ? runBatchMutation.error.message
-                      : "Failed to start batch pipeline."
-                  }
-                />
-              </div>
-            )}
-            {runBatchMutation.isSuccess && (
-              <div className="mt-3 text-sm text-emerald-700">
-                {runBatchMutation.data.started
-                  ? "Batch pipeline started on the backend. Check the Prospects page for progress."
-                  : "Batch pipeline did not start — nothing was queued."}
               </div>
             )}
           </section>
@@ -343,17 +257,6 @@ export default function Dashboard() {
                   label="Citation validity"
                   value={metricsQuery.data.citation_validity}
                 />
-                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-                  <div className="text-xs uppercase tracking-wide text-slate-500">
-                    Avg. edit distance
-                  </div>
-                  <div className="text-lg font-semibold text-slate-900">
-                    {metricsQuery.data.avg_edit_distance === null ||
-                    metricsQuery.data.avg_edit_distance === undefined
-                      ? "not enough data yet"
-                      : metricsQuery.data.avg_edit_distance.toFixed(1)}
-                  </div>
-                </div>
               </div>
             )}
           </section>

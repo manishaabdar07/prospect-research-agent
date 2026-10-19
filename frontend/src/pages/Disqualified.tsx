@@ -4,6 +4,12 @@ import { getDisqualified } from "../api/client";
 import HookStrengthBadge from "../components/HookStrengthBadge";
 import { EmptyState, ErrorBanner, Spinner } from "../components/Feedback";
 
+const STAGE_LABELS: Record<string, string> = {
+  QUALIFICATION: "Dropped at qualification",
+  RESEARCH: "No usable hook found",
+  EMAIL_GENERATION: "Findings too thin for an email",
+};
+
 export default function Disqualified() {
   const query = useQuery({
     queryKey: ["disqualified"],
@@ -13,17 +19,14 @@ export default function Disqualified() {
   return (
     <div className="mx-auto max-w-4xl px-4 py-6 space-y-4">
       <div>
-        <h1 className="text-xl font-semibold text-slate-900">
-          Disqualified — agent found no usable hook (this is expected and
-          correct)
-        </h1>
+        <h1 className="text-xl font-semibold text-slate-900">Disqualified</h1>
         <p className="text-sm text-slate-500 mt-1">
-          These prospects scored below the hook-strength threshold (fewer
-          than 2 out of 3): the research agent could not find a specific,
-          verifiable fact worth building outreach on. A high disqualification
-          rate means the system is being honest about weak evidence, not
-          that it's failing — sending a generic email is worse than sending
-          none.
+          Prospects that dropped out of the pipeline, and why — whether they
+          failed intake qualification (headcount, location, exclusion list,
+          duplicate), the research agent found no usable hook, or the
+          findings were too thin to write a grounded email. A healthy
+          disqualification rate here means the system is being honest about
+          weak fit or weak evidence, not that it's failing.
         </p>
       </div>
 
@@ -51,23 +54,49 @@ export default function Disqualified() {
                   >
                     {item.full_name}
                   </Link>
-                  <HookStrengthBadge hookStrength={item.hook_strength} />
+                  {item.hook_strength !== null && (
+                    <HookStrengthBadge hookStrength={item.hook_strength} />
+                  )}
                 </div>
                 <div className="text-sm text-slate-500">{item.company_name}</div>
               </div>
+              <span className="inline-flex items-center rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700 whitespace-nowrap">
+                {STAGE_LABELS[item.stage] ?? item.stage}
+              </span>
             </div>
-            <div className="mt-2 text-sm text-slate-600">
-              <span className="font-medium text-slate-700">
-                Terminal reason:
-              </span>{" "}
-              {item.terminal_reason}
-            </div>
-            {item.agent_notes && (
-              <div className="mt-1 text-sm text-slate-500 whitespace-pre-wrap">
-                <span className="font-medium text-slate-600">
-                  Agent notes:
-                </span>{" "}
-                {item.agent_notes}
+
+            {item.stage === "QUALIFICATION" && item.qualification_reason && (
+              <div className="mt-2 text-sm text-slate-600">
+                <span className="font-medium text-slate-700">Reason:</span>{" "}
+                {item.qualification_reason}
+              </div>
+            )}
+
+            {item.stage === "RESEARCH" && (
+              <>
+                {item.terminal_reason && (
+                  <div className="mt-2 text-sm text-slate-600">
+                    <span className="font-medium text-slate-700">
+                      Terminal reason:
+                    </span>{" "}
+                    {item.terminal_reason}
+                  </div>
+                )}
+                {item.agent_notes && (
+                  <div className="mt-1 text-sm text-slate-500 whitespace-pre-wrap">
+                    <span className="font-medium text-slate-600">
+                      Agent notes:
+                    </span>{" "}
+                    {item.agent_notes}
+                  </div>
+                )}
+              </>
+            )}
+
+            {item.stage === "EMAIL_GENERATION" && item.email_disqualify_reason && (
+              <div className="mt-2 text-sm text-slate-600">
+                <span className="font-medium text-slate-700">Reason:</span>{" "}
+                {item.email_disqualify_reason}
               </div>
             )}
           </div>

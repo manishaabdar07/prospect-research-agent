@@ -8,11 +8,8 @@ that failure only surfaces when a DB session is actually used).
 from __future__ import annotations
 
 from functools import lru_cache
-from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
@@ -23,9 +20,12 @@ class Settings(BaseSettings):
     # (user=prospect, password=prospect, db=prospect_research).
     DATABASE_URL: str = "postgresql://prospect:prospect@localhost:5432/prospect_research"
 
-    # --- Anthropic / LLM ---
-    ANTHROPIC_API_KEY: str | None = None
-    ANTHROPIC_MODEL: str = "claude-sonnet-5"
+    # --- OpenAI / LLM ---
+    # gpt-4o supports tool/function calling; override via .env for a
+    # different model. Note: an o-series/reasoning model would need
+    # max_completion_tokens instead of max_tokens in the API calls.
+    OPENAI_API_KEY: str | None = None
+    OPENAI_MODEL: str = "gpt-4o"
 
     # --- Search provider ---
     SEARCH_PROVIDER: str = "mock"  # "mock" | "brave"
@@ -48,8 +48,16 @@ class Settings(BaseSettings):
     FETCH_TIMEOUT_SECONDS: float = 15.0
     FETCH_MAX_CHARS: int = 16000  # ~4000 tokens
 
-    # --- Storage ---
-    PDF_DIR: Path = BACKEND_DIR / "data" / "pdfs"
+    # --- Email sending (Stage 6) ---
+    # Generic SMTP only for v1 -- no third-party provider SDK. Leave EMAIL_HOST
+    # unset to run the app without sending capability; /send-email returns a
+    # clean 503 until it's configured (see app/deps.py::require_email_configured).
+    EMAIL_PROVIDER: str = "smtp"
+    EMAIL_HOST: str | None = None
+    EMAIL_PORT: int = 587
+    EMAIL_USERNAME: str | None = None
+    EMAIL_PASSWORD: str | None = None
+    EMAIL_FROM: str | None = None
 
     @property
     def cors_origins_list(self) -> list[str]:

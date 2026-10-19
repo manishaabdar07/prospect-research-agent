@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from pathlib import Path
+from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.crm import PostgresCRMAdapter
 from app.database import get_db
-from app.deps import require_llm_configured
+from app.deps import require_email_configured, require_llm_configured
+from app.email_service import EmailSendError, get_email_service
 from app.models import (
     Company,
+    EmailDraft,
+    EmailDraftStatus,
     Finding,
-    OutreachDraft,
     Prospect,
     ProspectStatus,
     ResearchFindings,
@@ -21,19 +21,19 @@ from app.models import (
 from app.risk_flags import compute_risk_flags
 from app.schemas import (
     CompanySchema,
-    OutreachDraftSchema,
+    EmailDraftEditRequest,
+    EmailDraftSchema,
+    EmailGenerateResponse,
     ProspectDetailResponse,
     ProspectListItem,
     ProspectSchema,
-    RenderResponse,
     ResearchFindingsSchema,
     ResearchStartResponse,
     ResearchStatusResponse,
-    SynthesizeResponse,
+    SendEmailResponse,
 )
 from app.stages.stage3_agent import get_job_error, run_research_job
-from app.stages.stage4_synthesize import synthesize_prospect
-from app.stages.stage5_render import render_prospect_pdf
+from app.stages.stage4_generate_email import generate_email as run_generate_email
 
 router = APIRouter(tags=["prospects"])
 
@@ -81,7 +81,7 @@ def get_prospect(prospect_id: str, db: Session = Depends(get_db)) -> ProspectDet
 
     findings = db.scalars(select(Finding).where(Finding.prospect_id == prospect_id)).all()
     research = db.get(ResearchFindings, prospect_id)
-    draft = db.get(OutreachDraft, prospect_id)
+    draft = db.get(EmailDraft, prospect_id)
 
     research_schema = None
     if research is not None:
@@ -97,9 +97,7 @@ def get_prospect(prospect_id: str, db: Session = Depends(get_db)) -> ProspectDet
         )
 
     flags = compute_risk_flags(prospect, company, findings, draft)
-    pdf_available = bool(prospect.pdf_path) and Path(prospect.pdf_path).exists()
-
-    draft_schema = OutreachDraftSchema.model_validate(draft) if draft is not None else None
+    draft_schema = EmailDraftSchema.model_validate(draft) if draft is not None else None
 
     return ProspectDetailResponse(
         prospect=ProspectSchema.model_validate(prospect),
@@ -107,7 +105,6 @@ def get_prospect(prospect_id: str, db: Session = Depends(get_db)) -> ProspectDet
         research=research_schema,
         draft=draft_schema,
         risk_flags=flags,
-        pdf_available=pdf_available,
     )
 
 
@@ -118,7 +115,12 @@ def start_research(
     db: Session = Depends(get_db),
     _llm=Depends(require_llm_configured),
 ) -> ResearchStartResponse:
-    _get_prospect_or_404(db, prospect_id)
+    prospect = _get_prospect_or_404(db, prospect_id)
+    # Set immediately, before the background task actually starts running, so
+    # a client polling right after this call sees a real "queued" state
+    # instead of the job appearing not to have started at all.
+    prospect.status = ProspectStatus.RESEARCH_PENDING
+    db.commit()
     background_tasks.add_task(run_research_job, prospect_id)
     return ResearchStartResponse(job_status="RUNNING")
 
@@ -127,9 +129,10 @@ def start_research(
 def research_status(prospect_id: str, db: Session = Depends(get_db)) -> ResearchStatusResponse:
     prospect = _get_prospect_or_404(db, prospect_id)
 
-    if get_job_error(prospect_id):
-        return ResearchStatusResponse(status="ERROR")
-
+    if prospect.status == ProspectStatus.ERROR:
+        return ResearchStatusResponse(status="ERROR", error_message=prospect.last_error or get_job_error(prospect_id))
+    if prospect.status == ProspectStatus.RESEARCH_PENDING:
+        return ResearchStatusResponse(status="PENDING")
     if prospect.status == ProspectStatus.RESEARCHING:
         return ResearchStatusResponse(status="RUNNING")
 
@@ -144,12 +147,12 @@ def research_status(prospect_id: str, db: Session = Depends(get_db)) -> Research
     return ResearchStatusResponse(status="PENDING")
 
 
-@router.post("/prospects/{prospect_id}/synthesize", response_model=SynthesizeResponse)
-def synthesize(
+@router.post("/prospects/{prospect_id}/generate-email", response_model=EmailGenerateResponse)
+def generate_email(
     prospect_id: str,
     db: Session = Depends(get_db),
     _llm=Depends(require_llm_configured),
-) -> SynthesizeResponse:
+) -> EmailGenerateResponse:
     prospect = _get_prospect_or_404(db, prospect_id)
     research = db.get(ResearchFindings, prospect_id)
 
@@ -160,43 +163,67 @@ def synthesize(
     if research.hook_strength < 2:
         prospect.status = ProspectStatus.DISQUALIFIED
         db.commit()
-        return SynthesizeResponse(status="DISQUALIFIED", draft=None)
+        return EmailGenerateResponse(status="DISQUALIFIED", draft=None)
 
-    outcome = synthesize_prospect(db, prospect)
-    draft_schema = OutreachDraftSchema.model_validate(outcome.draft) if outcome.draft is not None else None
-    return SynthesizeResponse(status=outcome.status, draft=draft_schema)
+    outcome = run_generate_email(db, prospect)
+    draft_schema = EmailDraftSchema.model_validate(outcome.draft) if outcome.draft is not None else None
+    return EmailGenerateResponse(status=outcome.status, draft=draft_schema)
 
 
-@router.post("/prospects/{prospect_id}/render", response_model=RenderResponse)
-def render(prospect_id: str, db: Session = Depends(get_db)) -> RenderResponse:
+@router.patch("/prospects/{prospect_id}/email-draft", response_model=EmailDraftSchema)
+def update_email_draft(
+    prospect_id: str,
+    body: EmailDraftEditRequest,
+    db: Session = Depends(get_db),
+) -> EmailDraftSchema:
     prospect = _get_prospect_or_404(db, prospect_id)
-    company = db.get(Company, prospect.company_id)
-    if company is None:
-        raise HTTPException(status_code=500, detail="prospect has no associated company")
+    draft = db.get(EmailDraft, prospect_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="no email draft for this prospect yet")
+    if prospect.status == ProspectStatus.EMAIL_SENT:
+        raise HTTPException(status_code=400, detail="cannot edit a draft that has already been sent")
 
-    research = db.get(ResearchFindings, prospect_id)
-    if research is None:
-        raise HTTPException(status_code=400, detail="prospect has not completed research yet")
-
-    findings = db.scalars(select(Finding).where(Finding.prospect_id == prospect_id)).all()
-    draft = db.get(OutreachDraft, prospect_id)
-    flags = compute_risk_flags(prospect, company, findings, draft)
-
-    path = render_prospect_pdf(prospect, company, findings, research, draft, flags)
-
-    crm = PostgresCRMAdapter(db)
-    crm.attach_file(prospect.prospect_id, path)
-
-    if prospect.status not in (ProspectStatus.APPROVED, ProspectStatus.REJECTED, ProspectStatus.EDITED):
-        prospect.status = ProspectStatus.RENDERED
-        db.commit()
-
-    return RenderResponse(pdf_url=f"/api/prospects/{prospect_id}/pdf")
+    if body.subject is not None:
+        draft.subject = body.subject
+    if body.body is not None:
+        draft.body = body.body
+    db.commit()
+    return EmailDraftSchema.model_validate(draft)
 
 
-@router.get("/prospects/{prospect_id}/pdf")
-def get_pdf(prospect_id: str, db: Session = Depends(get_db)) -> Response:
+@router.post("/prospects/{prospect_id}/send-email", response_model=SendEmailResponse)
+def send_email(
+    prospect_id: str,
+    db: Session = Depends(get_db),
+    _email=Depends(require_email_configured),
+) -> SendEmailResponse:
     prospect = _get_prospect_or_404(db, prospect_id)
-    if not prospect.pdf_path or not Path(prospect.pdf_path).exists():
-        raise HTTPException(status_code=404, detail="PDF not available -- call render first")
-    return FileResponse(prospect.pdf_path, media_type="application/pdf", filename=f"{prospect_id}.pdf")
+
+    # Never auto-send, never resend: only a prospect sitting exactly at
+    # EMAIL_DRAFTED (a fresh, unsent draft) is eligible.
+    if prospect.status != ProspectStatus.EMAIL_DRAFTED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"prospect is not ready to send (status={prospect.status.value}); "
+            "either no draft exists yet, or it was already sent",
+        )
+
+    draft = db.get(EmailDraft, prospect_id)
+    if draft is None or draft.disqualify:
+        raise HTTPException(status_code=400, detail="no sendable email draft for this prospect")
+    if not prospect.email:
+        raise HTTPException(status_code=400, detail="prospect has no recipient email address on file")
+    if not draft.subject or not draft.body:
+        raise HTTPException(status_code=400, detail="email draft subject/body must not be empty")
+
+    try:
+        get_email_service().send(to=prospect.email, subject=draft.subject, body=draft.body)
+    except EmailSendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    now = datetime.utcnow()
+    draft.status = EmailDraftStatus.SENT
+    draft.sent_at = now
+    prospect.status = ProspectStatus.EMAIL_SENT
+    db.commit()
+    return SendEmailResponse(status="SENT", sent_at=now)

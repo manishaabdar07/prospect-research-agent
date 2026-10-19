@@ -22,6 +22,7 @@ def qualify(_body: QualifyRequest = QualifyRequest(), db: Session = Depends(get_
     )
     return QualifyResponse(
         qualified=result.qualified_ids,
+        disqualified_count=result.disqualified_count,
         queued_remaining=result.queued_remaining,
         batch_size=result.batch_size,
     )

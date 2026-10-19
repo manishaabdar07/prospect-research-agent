@@ -4,26 +4,24 @@
 export type ProspectStatus =
   | "INGESTED"
   | "QUALIFIED"
-  | "RESEARCHING"
-  | "RESEARCHED"
   | "DISQUALIFIED"
-  | "SYNTHESIZED"
-  | "RENDERED"
-  | "APPROVED"
-  | "EDITED"
-  | "REJECTED";
+  | "RESEARCH_PENDING"
+  | "RESEARCHING"
+  | "RESEARCH_COMPLETED"
+  | "EMAIL_DRAFTED"
+  | "EMAIL_SENT"
+  | "ERROR";
 
 export const PROSPECT_STATUSES: ProspectStatus[] = [
   "INGESTED",
   "QUALIFIED",
-  "RESEARCHING",
-  "RESEARCHED",
   "DISQUALIFIED",
-  "SYNTHESIZED",
-  "RENDERED",
-  "APPROVED",
-  "EDITED",
-  "REJECTED",
+  "RESEARCH_PENDING",
+  "RESEARCHING",
+  "RESEARCH_COMPLETED",
+  "EMAIL_DRAFTED",
+  "EMAIL_SENT",
+  "ERROR",
 ];
 
 export type EvidenceSlot =
@@ -48,21 +46,6 @@ export type RiskFlagType =
   | "NAME_COLLISION"
   | "NO_PERSON_SIGNAL";
 
-export type RejectReason =
-  | "BAD_FIT"
-  | "WEAK_HOOK"
-  | "WRONG_FACTS"
-  | "TONE"
-  | "ALREADY_KNOWN";
-
-export const REJECT_REASONS: RejectReason[] = [
-  "BAD_FIT",
-  "WEAK_HOOK",
-  "WRONG_FACTS",
-  "TONE",
-  "ALREADY_KNOWN",
-];
-
 // ---- 1. POST /ingest ----
 export interface IngestRejectedRow {
   row: number;
@@ -72,11 +55,15 @@ export interface IngestRejectedRow {
 export interface IngestResponse {
   ingested: number;
   rejected: IngestRejectedRow[];
+  qualified_count: number;
+  disqualified_count: number;
+  pipeline_started_count: number;
 }
 
 // ---- 2. POST /qualify ----
 export interface QualifyResponse {
   qualified: string[];
+  disqualified_count: number;
   queued_remaining: number;
   batch_size: number;
 }
@@ -114,22 +101,19 @@ export interface Research {
   tool_calls_used: number;
 }
 
-export type EmailPurpose = "GIVE" | "ASK";
+export type EmailDraftStatus = "DRAFTED" | "SENT";
 
-export interface EmailStep {
-  step: number;
-  send_after_days: number;
+export interface EmailDraft {
+  prospect_id: string;
   subject: string;
   body: string;
-  purpose: EmailPurpose;
-}
-
-export interface Draft {
-  connection_note: string;
-  email_sequence: EmailStep[];
   claims_used: string[];
   disqualify: boolean;
   disqualify_reason: string | null;
+  needs_human_review: boolean;
+  status: EmailDraftStatus;
+  created_at: string;
+  sent_at: string | null;
 }
 
 export interface RiskFlag {
@@ -157,6 +141,10 @@ export interface ProspectInfo {
   status?: ProspectStatus;
   linkedin_url?: string | null;
   email?: string | null;
+  qualification_reason?: string | null;
+  qualified_at?: string | null;
+  last_error?: string | null;
+  last_error_at?: string | null;
   [key: string]: unknown;
 }
 
@@ -164,9 +152,8 @@ export interface ProspectDetail {
   prospect: ProspectInfo;
   company: CompanyInfo;
   research: Research | null;
-  draft: Draft | null;
+  draft: EmailDraft | null;
   risk_flags: RiskFlag[];
-  pdf_available: boolean;
 }
 
 // ---- 5 & 6. research + status ----
@@ -180,70 +167,50 @@ export interface ResearchStatusResponse {
   status: ResearchJobStatus;
   hook_strength?: number;
   terminal_reason?: string;
+  error_message?: string | null;
 }
 
-// ---- 7. synthesize ----
-export interface SynthesizeResponse {
-  status: "DONE" | "DISQUALIFIED" | "ERROR";
-  draft?: Draft;
+// ---- 7. generate email ----
+export interface EmailGenerateResponse {
+  status: "DONE" | "DISQUALIFIED" | "NEEDS_REVIEW" | "ERROR";
+  draft?: EmailDraft | null;
 }
 
-// ---- 8. render ----
-export interface RenderResponse {
-  pdf_url: string;
+// ---- 8. edit email draft ----
+export interface EmailDraftEditRequest {
+  subject?: string;
+  body?: string;
 }
 
-// ---- 10. review queue ----
-export interface ReviewQueueItem {
-  prospect_id: string;
-  full_name: string;
-  company_name: string;
-  hook_strength: number;
-  pdf_url: string;
-  risk_flags: RiskFlag[];
+// ---- 9. send email ----
+export interface SendEmailResponse {
+  status: "SENT";
+  sent_at: string;
 }
 
-export interface ApproveResponse {
-  status: "APPROVED";
-}
+// ---- 10. disqualified ----
+export type DisqualificationStage = "QUALIFICATION" | "RESEARCH" | "EMAIL_GENERATION";
 
-export interface EditRequest {
-  edited_connection_note?: string;
-  edited_email_sequence?: EmailStep[];
-}
-
-export interface EditResponse {
-  status: "EDITED";
-  edit_distance: number;
-}
-
-export interface RejectRequest {
-  reason: RejectReason;
-}
-
-export interface RejectResponse {
-  status: "REJECTED";
-}
-
-// ---- 14. disqualified ----
 export interface DisqualifiedItem {
   prospect_id: string;
   full_name: string;
   company_name: string;
-  hook_strength: number;
-  terminal_reason: string;
-  agent_notes: string;
+  stage: DisqualificationStage | string;
+  qualification_reason: string | null;
+  hook_strength: number | null;
+  terminal_reason: string | null;
+  agent_notes: string | null;
+  email_disqualify_reason: string | null;
 }
 
-// ---- 15. eval metrics ----
+// ---- 11. eval metrics ----
 export interface EvalMetrics {
   hook_recall: number | null;
   disqualification_precision: number | null;
   citation_validity: number | null;
-  avg_edit_distance: number | null;
 }
 
-// ---- 16. run-batch ----
+// ---- 12. run-batch ----
 export interface RunBatchResponse {
   started: boolean;
 }

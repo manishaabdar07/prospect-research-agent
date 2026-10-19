@@ -3,7 +3,6 @@ import NavBar from "./components/NavBar";
 import Dashboard from "./pages/Dashboard";
 import ProspectsList from "./pages/ProspectsList";
 import ProspectDetail from "./pages/ProspectDetail";
-import ReviewQueue from "./pages/ReviewQueue";
 import Disqualified from "./pages/Disqualified";
 
 export default function App() {
@@ -15,7 +14,6 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/prospects" element={<ProspectsList />} />
           <Route path="/prospects/:id" element={<ProspectDetail />} />
-          <Route path="/review-queue" element={<ReviewQueue />} />
           <Route path="/disqualified" element={<Disqualified />} />
           <Route
             path="*"
